@@ -1,7 +1,12 @@
 import sqlite3
+import sys
 
 def init_db():
     """初始化数据库，创建测试用例表和评测记录表"""
+    # 强制设置 stdout 编码为 UTF-8，解决 Windows 终端中文乱码问题
+    if sys.stdout.encoding != 'utf-8':
+        sys.stdout.reconfigure(encoding='utf-8')
+        
     conn = sqlite3.connect('eval_results.db')
     cursor = conn.cursor()
 
@@ -43,19 +48,25 @@ def init_db():
             max_context INTEGER,                -- 模型支持的最大上下文
             
             -- 评分与反馈
-            eval_score INTEGER,                 -- 评分 (0-10)
-            eval_comment TEXT,                  -- 评语
+            eval_score INTEGER,                 -- 评分 (旧版 0-10)
+            eval_comment TEXT,                  -- 评语 (旧版)
+            eval_score_super INTEGER,           -- super 评委评分 (0-100)
+            eval_comment_super TEXT,            -- super 评委评语
+            eval_score_high INTEGER,            -- high 评委评分 (0-100)
+            eval_comment_high TEXT,             -- high 评委评语
+            eval_score_low INTEGER,             -- low 评委评分 (0-100)
+            eval_comment_low TEXT,              -- low 评委评语
             
             -- 元数据
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             
-            FOREIGN KEY (case_id) REFERENCES test_cases(id)
+            FOREIGN KEY (case_id) REFERENCES test_cases(id) ON DELETE CASCADE
         )
     ''')
 
     conn.commit()
     conn.close()
-    print("✅ 数据库初始化成功！")
+    print("数据库初始化成功！")
     print("   - test_cases 表已创建")
     print("   - eval_records 表已创建")
 

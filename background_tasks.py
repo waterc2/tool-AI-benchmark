@@ -1,0 +1,170 @@
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from database import update_eval_scores, get_connection
+from llm_client import call_local_llm, call_all_evaluators
+
+
+def get_safe_result(res, key, default):
+    return res.get(key, default) if isinstance(res, dict) else default
+
+
+class BackgroundTaskManager:
+    def __init__(self):
+        self.is_running = False
+        self.progress = 0.0
+        self.status = "空闲"
+        self.logs = []
+        self.current_case = ""
+        self.total_cases = 0
+        self.completed_cases = 0
+        self.thread = None
+        self.stop_requested = False
+        self.eval_executor = ThreadPoolExecutor(max_workers=3)
+        self.pending_evals = 0
+        self.completed_evals = 0
+
+    def add_log(self, msg):
+        timestamp = time.strftime("%H:%M:%S")
+        self.logs.append(f"[{timestamp}] {msg}")
+        if len(self.logs) > 100:
+            self.logs.pop(0)
+
+    def async_evaluate_and_save(self, case, local_res, record_id):
+        try:
+            self.add_log(f"[异步评分] 开始评分用例: {case['title']}")
+            eval_results = call_all_evaluators(case['prompt'], case['reference_answer'], local_res['content'])
+
+            any_fail = any("评委调用在" in get_safe_result(res, 'reasoning', "") for res in eval_results.values())
+
+            if any_fail:
+                self.add_log(f"[异步评分] ⚠️ 用例 '{case['title']}' 部分评分失败")
+            else:
+                scores_str = ", ".join([f"{k}: {get_safe_result(v, 'score', 0)}" for k, v in eval_results.items()])
+                self.add_log(f"[异步评分] 用例 '{case['title']}' 评分完成: {scores_str}")
+
+            update_eval_scores(record_id, eval_results)
+            self.add_log(f"[异步评分] ✅ 用例 '{case['title']}' 评分已更新到数据库")
+
+        except Exception as e:
+            self.add_log(f"[异步评分] ❌ 用例 '{case['title']}' 评分失败: {str(e)}")
+        finally:
+            self.completed_evals += 1
+
+    def async_re_evaluate(self, record_id, case_title, prompt, reference_answer, local_response):
+        try:
+            self.add_log(f"[重新评分] 开始评分记录ID: {record_id} ({case_title})")
+            eval_results = call_all_evaluators(prompt, reference_answer, local_response)
+
+            any_fail = any("评委调用在" in get_safe_result(res, 'reasoning', "") for res in eval_results.values())
+
+            if any_fail:
+                self.add_log(f"[重新评分] ⚠️ 记录 {record_id} 部分评分失败")
+            else:
+                scores_str = ", ".join([f"{k}: {get_safe_result(v, 'score', 0)}" for k, v in eval_results.items()])
+                self.add_log(f"[重新评分] 记录 {record_id} 评分完成: {scores_str}")
+
+            update_eval_scores(record_id, eval_results)
+            self.add_log(f"[重新评分] ✅ 记录 {record_id} 评分已更新到数据库")
+
+        except Exception as e:
+            self.add_log(f"[重新评分] ❌ 记录 {record_id} 评分失败: {str(e)}")
+        finally:
+            self.completed_evals += 1
+
+    def submit_re_evaluate(self, record_id, case_title, prompt, reference_answer, local_response):
+        self.pending_evals += 1
+        self.eval_executor.submit(self.async_re_evaluate, record_id, case_title, prompt, reference_answer, local_response)
+        self.add_log(f"🔄 已提交记录 {record_id} ({case_title}) 到异步重新评分队列")
+
+    def run_batch_test(self, selected_cases):
+        self.is_running = True
+        self.stop_requested = False
+        self.progress = 0.0
+        self.completed_cases = 0
+        self.total_cases = len(selected_cases)
+        self.logs = []
+        # 不重置评分计数器，允许累加（支持并发的重新评分任务）
+        # self.pending_evals = 0
+        # self.completed_evals = 0
+
+        for idx, case in enumerate(selected_cases):
+            if self.stop_requested:
+                self.add_log("🛑 任务被用户停止")
+                break
+
+            self.current_case = case['title']
+            self.status = f"正在处理 ({idx+1}/{self.total_cases}): {self.current_case}"
+            self.add_log(f">>> 开始测试用例: {self.current_case}")
+
+            local_res = None
+            try:
+                self.add_log("正在请求本地模型...")
+                local_res = call_local_llm(case['source_code'], case['prompt'])
+                self.add_log(f"本地模型响应成功 ({local_res['completion_tokens']} tokens)")
+
+                record_data = {
+                    "case_id": case['id'],
+                    "model_name": local_res['model_name'],
+                    "temperature": 0.0,
+                    "local_response": local_res['content'],
+                    "chain_of_thought": local_res['chain_of_thought'],
+                    "prompt_tokens": local_res['prompt_tokens'],
+                    "completion_tokens": local_res['completion_tokens'],
+                    "total_time_ms": local_res['duration_ms'],
+                    "tokens_per_second": local_res['tps'],
+                    "prompt_tps": local_res.get('prompt_tps', 0),
+                    "max_context": local_res.get('max_context', 0),
+                    "eval_score": 0,
+                    "eval_comment": "待评分",
+                    "eval_score_super": 0,
+                    "eval_comment_super": "待评分",
+                    "eval_score_high": 0,
+                    "eval_comment_high": "待评分",
+                    "eval_score_low": 0,
+                    "eval_comment_low": "待评分"
+                }
+
+                conn = get_connection()
+                cursor = conn.cursor()
+                fields = list(record_data.keys())
+                placeholders = ', '.join(['?' for _ in fields])
+                columns = ', '.join(fields)
+                values = [record_data.get(field) for field in fields]
+                if 'case_id' in fields:
+                    idx_case = fields.index('case_id')
+                    if values[idx_case] is not None:
+                        values[idx_case] = int(values[idx_case])
+                query = f"INSERT INTO eval_records ({columns}) VALUES ({placeholders})"
+                cursor.execute(query, values)
+                record_id = cursor.lastrowid
+                conn.commit()
+                conn.close()
+
+                self.add_log(f"✅ 用例 '{self.current_case}' 本地测试完成，已保存 (记录ID: {record_id})")
+
+                self.pending_evals += 1
+                self.eval_executor.submit(self.async_evaluate_and_save, case, local_res, record_id)
+                self.add_log(f"🚀 已提交用例 '{self.current_case}' 到异步评分队列")
+
+            except Exception as e:
+                self.add_log(f"❌ 执行失败: {str(e)}")
+
+            self.completed_cases += 1
+            self.progress = self.completed_cases / self.total_cases
+
+        self.is_running = False
+        self.status = f"测试完成，等待评分 ({self.completed_evals}/{self.pending_evals})"
+        self.progress = 1.0
+
+        self.status = "全部完成"
+        self.add_log(f"🎉 所有任务完成！共测试 {self.total_cases} 个用例，评分 {self.completed_evals} 个")
+
+    def start_task(self, selected_cases):
+        if not self.is_running:
+            self.thread = threading.Thread(target=self.run_batch_test, args=(selected_cases,))
+            self.thread.daemon = True
+            self.thread.start()
+
+    def stop_task(self):
+        self.stop_requested = True
