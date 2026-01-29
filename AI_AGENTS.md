@@ -24,13 +24,19 @@ Local LLM Code Benchmarker 是一个用于自动化测试本地大语言模型�
 - 获取 0-100 的评分和详细评价意见
 - **三评委并行评分**：Super、High、Low 三个评委模型同时打分
 - **异步评分队列**：评分任务在后台异步执行，不阻塞测试流程
+- **自动重新评分**：一键重新评分所有失败或分数为 0 的记录
+- **选择性重评**：支持指定特定评委级别进行重新评分
 - 支持多次测试结果对比和重新评分
 
+
 ### 数据分析
-- 按模型查看平均分统计和各题详情 (平均分采用 Super 50%, High 30%, Low 20% 加权计算)
-- 按测试题查看全模型平均分及排名
-- 按平均耗时查看模型速度排行（耗时越短排名越高）
-- 历史记录持久化存储
+- **模型类型筛选**：支持按"全部"、"本地模型"、"远端模型"筛选统计数据
+- **按模型统计**：查看各模型的平均分、平均执行时间及各题详情（包括三评委详细分数）
+- **按测试题统计**：查看各题的全模型平均分、模型排名及平均执行时间
+- **综合平均分计算**：采用 Super 50%, High 30%, Low 20% 加权计算
+- **速度排行**：按平均耗时查看模型速度排行（耗时越短排名越高）
+- **历史记录**：持久化存储，支持分页显示和自动重新评分
+
 
 ## 🛠️ 技术栈
 
@@ -44,8 +50,17 @@ Local LLM Code Benchmarker 是一个用于自动化测试本地大语言模型�
 
 ```
 tool-AI-benchmark/
-├── app.py              # 主应用界面
-├── database.py         # 数据库操作模块
+├── app.py              # 主应用入口
+├── ui_pages.py         # UI 页面导出层（向后兼容）
+├── modules/            # UI 页面模块目录
+│   ├── __init__.py     # 公共导入
+│   ├── sidebar.py      # 侧边栏组件
+│   ├── case_manager.py # 用例管理页面
+│   ├── test_runner.py  # 执行测试页面
+│   ├── history.py      # 历史记录页面
+│   └── stats.py        # 统计分析页面
+├── database.py         # 数据库操作模块（带缓存）
+├── background_tasks.py # 后台任务管理器
 ├── init_db.py          # 数据库初始化
 ├── llm_client.py       # LLM API 客户端
 ├── AI_AGENTS.md        # 项目文档
@@ -107,14 +122,23 @@ streamlit run app.py
 | id | INTEGER | 记录 ID |
 | case_id | INTEGER | 用例 ID（外键） |
 | model_name | TEXT | 模型名称 |
+| temperature | REAL | 生成温度（默认 0.7） |
 | local_response | TEXT | 模型回答 |
 | chain_of_thought | TEXT | 思维链内容 |
 | prompt_tokens | INTEGER | 提示词 Token 数 |
 | completion_tokens | INTEGER | 回答 Token 数 |
-| total_time_ms | INTEGER | 总耗时（毫秒） |
-| tokens_per_second | REAL | 生成速度 |
-| eval_score | REAL | 评测分数 |
-| eval_comment | TEXT | 评测意见 |
+| total_time_ms | REAL | 总耗时（毫秒） |
+| tokens_per_second | REAL | 生成速度（tokens/s） |
+| prompt_tps | REAL | 预读速度（tokens/s） |
+| max_context | INTEGER | 模型支持的最大上下文 |
+| eval_score | INTEGER | 综合评分（加权平均：Super 50% + High 30% + Low 20%） |
+| eval_comment | TEXT | 评测意见（旧版） |
+| eval_score_super | INTEGER | Super 评委评分（0-100） |
+| eval_comment_super | TEXT | Super 评委评语 |
+| eval_score_high | INTEGER | High 评委评分（0-100） |
+| eval_comment_high | TEXT | High 评委评语 |
+| eval_score_low | INTEGER | Low 评委评分（0-100） |
+| eval_comment_low | TEXT | Low 评委评语 |
 | created_at | DATETIME | 创建时间 |
 
 ## 📋 开发历程
@@ -147,6 +171,28 @@ streamlit run app.py
 - [x] 评分队列后台运行，测试流程不阻塞
 - [x] 双进度条显示测试与评分进度
 
+### 第七阶段：性能优化与代码重构
+- [x] 数据库查询添加 `@st.cache_data` 缓存（TTL 10-60秒）
+- [x] 减少页面中的重复数据库调用
+- [x] 用例列表添加分页显示（每页15条）
+- [x] 自动刷新间隔从2秒优化至3秒
+- [x] 将 `ui_pages.py`（498行）拆分为5个独立模块（存放在 `modules/` 目录中）
+
+### 第八阶段：历史记录功能增强
+- [x] 历史记录页面添加分页功能（每页 20 条）
+- [x] 历史记录直接显示三评委分数（格式：综合分 (Super,High,Low)）
+- [x] 实现自动重新评分功能，针对评分失败或为 0 的记录
+- [x] 批量重新评分支持，一键提交所有失败记录到评分队列
+- [x] 单条记录重新评分功能，支持指定评委级别
+
+### 第九阶段：数据库架构升级与统计分析增强
+- [x] 添加 `is_remote` 字段区分本地模型与远端模型
+- [x] 实现自动识别远端模型（基于模型名称特征）
+- [x] 统计分析报告添加模型类型筛选（全部/本地模型/远端模型）
+- [x] 测试题统计页面显示三评委详细评分（super, high, low）
+- [x] 测试题统计页面显示各模型平均执行时间
+- [x] 所有统计查询支持按模型类型过滤
+
 ## ⚡ 异步执行架构
 
 ### 执行流程
@@ -173,6 +219,56 @@ streamlit run app.py
 - `ThreadPoolExecutor(max_workers=3)`：评分任务线程池
 - `call_all_evaluators()`：并行调用三个评委模型
 - `update_eval_scores()`：评分完成后更新数据库
+
+## 🌐 远端模型识别
+
+### 自动识别机制
+
+系统通过模型名称自动识别本地模型和远端模型：
+
+**识别规则**：
+- **本地模型**：模型名称以 `.gguf` 结尾
+  - 例如：`Qwen3-30B-A3B-Instruct-2507-IQ4_XS-3.87bpw.gguf`
+  - 例如：`GLM-4.7-Flash-PRISM-Q3_K_M.gguf`
+  
+- **远端模型**：模型名称不以 `.gguf` 结尾
+  - 例如：`meta-llama/llama-3.3-70b-instruct:free`
+  - 例如：`gpt-4`
+  - 例如：`mimo-v2-flash`
+
+### 实现方式
+
+系统使用 `is_remote_model()` 辅助函数动态判断模型类型：
+
+```python
+def is_remote_model(model_name):
+    """判断是否为远端模型（基于模型名称）
+    
+    规则：
+    - 本地模型：以 .gguf 结尾
+    - 远端模型：不以 .gguf 结尾
+    
+    Returns:
+        bool: True 表示远端模型，False 表示本地模型
+    """
+    if not model_name:
+        return False
+    return not model_name.endswith('.gguf')
+```
+
+### 应用场景
+
+- **统计分析筛选**：在“统计分析报告”页面按模型类型筛选
+- **性能对比**：分别对比本地模型和远端模型的性能
+- **成本评估**：区分本地和云端模型的使用情况
+
+### 优势
+
+1. **简单明确**：`.gguf` 后缀是本地模型的明确标识
+2. **无需维护**：不需要在数据库中存储和维护模型类型
+3. **动态判断**：根据模型名称实时判断，避免数据不一致
+4. **数据库更简洁**：减少一个字段，简化数据库架构
+
 
 ## 📝 许可证
 

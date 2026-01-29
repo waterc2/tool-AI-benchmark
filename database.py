@@ -1,6 +1,7 @@
 import sqlite3
 import pandas as pd
 import json
+import streamlit as st
 
 DB_PATH = 'eval_results.db'
 
@@ -8,6 +9,30 @@ def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def is_remote_model(model_name):
+    """判断是否为远端模型（基于模型名称）
+    
+    规则：
+    - 本地模型：以 .gguf 结尾
+    - 远端模型：不以 .gguf 结尾
+    
+    Args:
+        model_name: 模型名称
+        
+    Returns:
+        bool: True 表示远端模型，False 表示本地模型
+    """
+    if not model_name:
+        return False
+    return not model_name.endswith('.gguf')
+
+
+def clear_cache():
+    """清除所有 Streamlit 数据缓存"""
+    st.cache_data.clear()
+
 
 # --- 测试用例 (Test Cases) 管理 ---
 
@@ -33,9 +58,12 @@ def save_test_case(title, category, source_code_dict, prompt, reference_answer, 
     
     conn.commit()
     conn.close()
+    clear_cache()  # 清除缓存以反映新数据
 
+
+@st.cache_data(ttl=60)
 def get_all_test_cases():
-    """获取所有测试用例"""
+    """获取所有测试用例（缓存60秒）"""
     conn = get_connection()
     query = "SELECT * FROM test_cases ORDER BY created_at DESC"
     df = pd.read_sql_query(query, conn)
@@ -50,6 +78,7 @@ def delete_test_case(case_id):
     cursor.execute("DELETE FROM test_cases WHERE id = ?", (case_id,))
     conn.commit()
     conn.close()
+    clear_cache()
 
 def delete_eval_record(record_id):
     """删除单条评测记录"""
@@ -58,6 +87,7 @@ def delete_eval_record(record_id):
     cursor.execute("DELETE FROM eval_records WHERE id = ?", (record_id,))
     conn.commit()
     conn.close()
+    clear_cache()
 
 def get_safe_result(res, key, default):
     """Safely retrieve a key from a dictionary, checking if res is a dict first."""
@@ -134,15 +164,31 @@ def save_eval_record(data):
     try:
         cursor.execute(query, values)
         conn.commit()
-        print(f"[DEBUG] Eval record saved successfully. ID: {cursor.lastrowid}")
+        record_id = cursor.lastrowid
+        print(f"[DEBUG] Eval record saved successfully. ID: {record_id}")
+        return record_id
     except Exception as e:
         print(f"[ERROR] Failed to save eval record: {str(e)}")
         raise e
     finally:
         conn.close()
 
+def get_eval_record_by_id(record_id):
+    """根据 ID 获取单条评测记录"""
+    conn = get_connection()
+    query = """
+        SELECT r.*, c.title as case_title, c.prompt, c.reference_answer
+        FROM eval_records r
+        JOIN test_cases c ON r.case_id = c.id
+        WHERE r.id = ?
+    """
+    df = pd.read_sql_query(query, conn, params=(int(record_id),))
+    conn.close()
+    return df.iloc[0].to_dict() if not df.empty else None
+
+@st.cache_data(ttl=30)
 def get_eval_history(case_id=None, model_name=None):
-    """获取评测历史，可选按 case_id 和 model_name 筛选"""
+    """获取评测历史，可选按 case_id 和 model_name 筛选（缓存30秒）"""
     conn = get_connection()
     query = """
         SELECT r.*, c.title as case_title, c.prompt, c.reference_answer
@@ -164,8 +210,9 @@ def get_eval_history(case_id=None, model_name=None):
     conn.close()
     return df
 
+@st.cache_data(ttl=30)
 def get_all_models():
-    """获取所有已记录的模型名称"""
+    """获取所有已记录的模型名称（缓存30秒）"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT model_name FROM eval_records WHERE model_name IS NOT NULL")
@@ -173,6 +220,8 @@ def get_all_models():
     conn.close()
     return models
 
+
+@st.cache_data(ttl=10)
 def get_stats():
     """获取全局统计指标"""
     conn = get_connection()
@@ -201,8 +250,9 @@ def get_stats():
     conn.close()
     return stats
 
-def get_model_summary_stats():
-    """以模型为单位的汇总统计"""
+@st.cache_data(ttl=30)
+def get_model_summary_stats(model_type="全部"):
+    """以模型为单位的汇总统计（缓存30秒）"""
     conn = get_connection()
     query = """
         SELECT model_name, 
@@ -216,8 +266,17 @@ def get_model_summary_stats():
     """
     df = pd.read_sql_query(query, conn)
     conn.close()
+    
+    # 根据模型类型过滤
+    if model_type == "本地模型":
+        df = df[df['model_name'].apply(lambda x: not is_remote_model(x))]
+    elif model_type == "远端模型":
+        df = df[df['model_name'].apply(lambda x: is_remote_model(x))]
+    
     return df
 
+
+@st.cache_data(ttl=30)
 def get_model_detail_stats(model_name):
     """特定模型在各个用例下的平均分及详细指标"""
     conn = get_connection()
@@ -245,44 +304,88 @@ def get_model_detail_stats(model_name):
     conn.close()
     return df
 
-def get_case_summary_stats():
-    """以测试题为单位的汇总统计"""
+@st.cache_data(ttl=30)
+def get_case_summary_stats(model_type="全部"):
+    """以测试题为单位的汇总统计（缓存30秒）"""
     conn = get_connection()
-    query = """
-        SELECT c.id as case_id, c.title as case_title, 
-               AVG(0.5 * COALESCE(r.eval_score_super, r.eval_score*10, 0) + 
+    
+    # 先获取所有数据
+    if model_type == "全部":
+        query = """
+            SELECT c.id as case_id, c.title as case_title, 
+                   AVG(0.5 * COALESCE(r.eval_score_super, r.eval_score*10, 0) + 
+                       0.3 * COALESCE(r.eval_score_high, r.eval_score*10, 0) + 
+                       0.2 * COALESCE(r.eval_score_low, r.eval_score*10, 0)) as avg_score, 
+                   COUNT(*) as total_runs
+            FROM eval_records r
+            JOIN test_cases c ON r.case_id = c.id
+            GROUP BY c.id
+            ORDER BY avg_score DESC
+        """
+        df = pd.read_sql_query(query, conn)
+    else:
+        # 需要按模型类型过滤，先获取详细数据
+        query = """
+            SELECT c.id as case_id, c.title as case_title,
+                   r.model_name,
+                   0.5 * COALESCE(r.eval_score_super, r.eval_score*10, 0) + 
                    0.3 * COALESCE(r.eval_score_high, r.eval_score*10, 0) + 
-                   0.2 * COALESCE(r.eval_score_low, r.eval_score*10, 0)) as avg_score, 
-               COUNT(*) as total_runs
-        FROM eval_records r
-        JOIN test_cases c ON r.case_id = c.id
-        GROUP BY c.id
-        ORDER BY avg_score DESC
-    """
-    df = pd.read_sql_query(query, conn)
+                   0.2 * COALESCE(r.eval_score_low, r.eval_score*10, 0) as score
+            FROM eval_records r
+            JOIN test_cases c ON r.case_id = c.id
+        """
+        df_raw = pd.read_sql_query(query, conn)
+        
+        # 根据模型类型过滤
+        if model_type == "本地模型":
+            df_raw = df_raw[df_raw['model_name'].apply(lambda x: not is_remote_model(x))]
+        elif model_type == "远端模型":
+            df_raw = df_raw[df_raw['model_name'].apply(lambda x: is_remote_model(x))]
+        
+        # 聚合统计
+        df = df_raw.groupby(['case_id', 'case_title']).agg(
+            avg_score=('score', 'mean'),
+            total_runs=('score', 'count')
+        ).reset_index().sort_values('avg_score', ascending=False)
+    
     conn.close()
     return df
 
-def get_case_model_ranking(case_id):
+
+@st.cache_data(ttl=30)
+def get_case_model_ranking(case_id, model_type="全部"):
     """特定测试题下各模型的排名"""
     conn = get_connection()
     query = """
         SELECT model_name, 
+               AVG(COALESCE(eval_score_super, eval_score*10, 0)) as avg_score_super,
+               AVG(COALESCE(eval_score_high, eval_score*10, 0)) as avg_score_high,
+               AVG(COALESCE(eval_score_low, eval_score*10, 0)) as avg_score_low,
                AVG(0.5 * COALESCE(eval_score_super, eval_score*10, 0) + 
                    0.3 * COALESCE(eval_score_high, eval_score*10, 0) + 
                    0.2 * COALESCE(eval_score_low, eval_score*10, 0)) as avg_score, 
+               AVG(total_time_ms) as avg_total_time_ms,
                COUNT(*) as run_count
         FROM eval_records
         WHERE case_id = ?
         GROUP BY model_name
         ORDER BY avg_score DESC
     """
-    df = pd.read_sql_query(query, conn, params=(case_id,))
+    df = pd.read_sql_query(query, conn, params=[int(case_id)])
     conn.close()
+    
+    # 根据模型类型过滤
+    if model_type == "本地模型":
+        df = df[df['model_name'].apply(lambda x: not is_remote_model(x))]
+    elif model_type == "远端模型":
+        df = df[df['model_name'].apply(lambda x: is_remote_model(x))]
+    
     return df
 
-def get_model_speed_ranking():
-    """获取模型速度排行（按平均耗时升序排序）"""
+
+@st.cache_data(ttl=30)
+def get_model_speed_ranking(model_type="全部"):
+    """获取模型速度排行（按平均耗时升序排序，缓存30秒）"""
     conn = get_connection()
     query = """
         SELECT model_name, 
@@ -297,4 +400,11 @@ def get_model_speed_ranking():
     """
     df = pd.read_sql_query(query, conn)
     conn.close()
+    
+    # 根据模型类型过滤
+    if model_type == "本地模型":
+        df = df[df['model_name'].apply(lambda x: not is_remote_model(x))]
+    elif model_type == "远端模型":
+        df = df[df['model_name'].apply(lambda x: is_remote_model(x))]
+    
     return df

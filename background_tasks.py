@@ -1,8 +1,8 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from database import update_eval_scores, get_connection
-from llm_client import call_local_llm, call_all_evaluators
+from database import update_eval_scores, get_connection, get_eval_record_by_id
+from llm_client import call_llm, call_all_evaluators, call_evaluator
 
 
 def get_safe_result(res, key, default):
@@ -51,10 +51,36 @@ class BackgroundTaskManager:
         finally:
             self.completed_evals += 1
 
-    def async_re_evaluate(self, record_id, case_title, prompt, reference_answer, local_response):
+    def async_re_evaluate(self, record_id, case_title, prompt, reference_answer, local_response, target_levels=None):
         try:
-            self.add_log(f"[重新评分] 开始评分记录ID: {record_id} ({case_title})")
-            eval_results = call_all_evaluators(prompt, reference_answer, local_response)
+            levels_str = ", ".join(target_levels) if target_levels else "全部"
+            self.add_log(f"[重新评分] 开始评分记录ID: {record_id} ({case_title}), 目标模型: {levels_str}")
+            
+            # 如果没有指定目标级别，则评分全部
+            if not target_levels:
+                eval_results = call_all_evaluators(prompt, reference_answer, local_response)
+            else:
+                # 获取现有评分记录以合并
+                existing_record = get_eval_record_by_id(record_id)
+                eval_results = {}
+                
+                # 初始化现有值
+                for level in ["super", "high", "low"]:
+                    eval_results[level] = {
+                        "score": existing_record.get(f'eval_score_{level}', 0),
+                        "reasoning": existing_record.get(f'eval_comment_{level}', "")
+                    }
+                
+                # 仅针对指定级别并行调用评委
+                from concurrent.futures import ThreadPoolExecutor as EvalExecutor
+                with EvalExecutor(max_workers=3) as executor:
+                    futures = {level: executor.submit(call_evaluator, prompt, reference_answer, local_response, level) 
+                               for level in target_levels}
+                    for level, future in futures.items():
+                        try:
+                            eval_results[level] = future.result()
+                        except Exception as e:
+                            eval_results[level] = {"score": 0, "reasoning": f"评委调用失败: {str(e)}"}
 
             any_fail = any("评委调用在" in get_safe_result(res, 'reasoning', "") for res in eval_results.values())
 
@@ -72,12 +98,15 @@ class BackgroundTaskManager:
         finally:
             self.completed_evals += 1
 
-    def submit_re_evaluate(self, record_id, case_title, prompt, reference_answer, local_response):
+    def submit_re_evaluate(self, record_id, case_title, prompt, reference_answer, local_response, target_levels=None):
         self.pending_evals += 1
-        self.eval_executor.submit(self.async_re_evaluate, record_id, case_title, prompt, reference_answer, local_response)
-        self.add_log(f"🔄 已提交记录 {record_id} ({case_title}) 到异步重新评分队列")
+        self.eval_executor.submit(self.async_re_evaluate, record_id, case_title, prompt, reference_answer, local_response, target_levels)
+        levels_str = ", ".join(target_levels) if target_levels else "全部"
+        self.add_log(f"🔄 已提交记录 {record_id} ({case_title}) 到异步重新评分队列 (目标: {levels_str})")
 
-    def run_batch_test(self, selected_cases):
+    def run_batch_test(self, selected_cases, api_base=None, api_key=None, model_id=None):
+        print(f"\n[DEBUG] BackgroundTaskManager.run_batch_test started with {len(selected_cases)} cases")
+        print(f"[DEBUG] Params: base={api_base}, model={model_id}")
         self.is_running = True
         self.stop_requested = False
         self.progress = 0.0
@@ -99,8 +128,8 @@ class BackgroundTaskManager:
 
             local_res = None
             try:
-                self.add_log("正在请求本地模型...")
-                local_res = call_local_llm(case['source_code'], case['prompt'])
+                self.add_log("正在请求 LLM...")
+                local_res = call_llm(case['source_code'], case['prompt'], api_base, api_key, model_id)
                 self.add_log(f"本地模型响应成功 ({local_res['completion_tokens']} tokens)")
 
                 record_data = {
@@ -125,21 +154,8 @@ class BackgroundTaskManager:
                     "eval_comment_low": "待评分"
                 }
 
-                conn = get_connection()
-                cursor = conn.cursor()
-                fields = list(record_data.keys())
-                placeholders = ', '.join(['?' for _ in fields])
-                columns = ', '.join(fields)
-                values = [record_data.get(field) for field in fields]
-                if 'case_id' in fields:
-                    idx_case = fields.index('case_id')
-                    if values[idx_case] is not None:
-                        values[idx_case] = int(values[idx_case])
-                query = f"INSERT INTO eval_records ({columns}) VALUES ({placeholders})"
-                cursor.execute(query, values)
-                record_id = cursor.lastrowid
-                conn.commit()
-                conn.close()
+                from database import save_eval_record
+                record_id = save_eval_record(record_data)
 
                 self.add_log(f"✅ 用例 '{self.current_case}' 本地测试完成，已保存 (记录ID: {record_id})")
 
@@ -160,9 +176,9 @@ class BackgroundTaskManager:
         self.status = "全部完成"
         self.add_log(f"🎉 所有任务完成！共测试 {self.total_cases} 个用例，评分 {self.completed_evals} 个")
 
-    def start_task(self, selected_cases):
+    def start_task(self, selected_cases, api_base=None, api_key=None, model_id=None):
         if not self.is_running:
-            self.thread = threading.Thread(target=self.run_batch_test, args=(selected_cases,))
+            self.thread = threading.Thread(target=self.run_batch_test, args=(selected_cases, api_base, api_key, model_id,))
             self.thread.daemon = True
             self.thread.start()
 
