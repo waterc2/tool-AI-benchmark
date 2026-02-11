@@ -37,10 +37,19 @@ pip install -r requirements.txt
 ```bash
 cp .env.example .env
 ```
+
+**重要**: 请编辑 `.env` 文件，将示例密钥替换为您的实际 API 密钥。
+
 主要配置项：
-- `LOCAL_MODEL_URL`: 本地模型的 API 地址（默认：http://10.0.0.114:8080/v1）。
-- `EVALUATOR_API_KEY`: 评委大模型（如 OpenAI）的 API Key。
-- `EVALUATOR_BASE_URL`: 评委模型的 API 代理地址（可选）。
+- `LOCAL_MODEL_URL`: 本地模型的 API 地址（默认：https://openrouter.ai/api/v1）
+- `LOCAL_MODEL_KEY`: 您的 API 密钥（**必须填写实际密钥**）
+- `LOCAL_MODEL_ID`: 模型名称或 ID
+- `EVALUATOR_API_KEY`: 评委大模型的 API 密钥（**必须填写实际密钥**）
+- `EVALUATOR_BASE_URL`: 评委模型的 API 地址（可选）
+
+详细配置说明请参考 [CONFIG.md](CONFIG.md)
+
+⚠️ **安全提示**: `.env` 和 `config.py` 文件已被添加到 `.gitignore`，不会被提交到 git。请勿在代码中硬编码 API 密钥！
 
 ### 4. 启动应用
 ```bash

@@ -1,7 +1,7 @@
 import sqlite3
 import sys
 
-def init_db():
+def init_db(clear_records=False):
     """初始化数据库，创建测试用例表和评测记录表"""
     # 强制设置 stdout 编码为 UTF-8，解决 Windows 终端中文乱码问题
     if sys.stdout.encoding != 'utf-8':
@@ -9,6 +9,11 @@ def init_db():
         
     conn = sqlite3.connect('eval_results.db')
     cursor = conn.cursor()
+
+    # 如果需要清空记录，删除评测记录表
+    if clear_records:
+        print("正在清空评测记录...")
+        cursor.execute('DROP TABLE IF EXISTS eval_records')
 
     # 创建测试用例表
     cursor.execute('''
@@ -23,7 +28,7 @@ def init_db():
         )
     ''')
 
-    # 创建评测记录表（重构版）
+    # 创建评测记录表（重构版，包含 Gem, Opus, GPT, Grok 四种评分模型）
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS eval_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,15 +52,20 @@ def init_db():
             prompt_tps REAL,                    -- 预读速度 (tokens/s)
             max_context INTEGER,                -- 模型支持的最大上下文
             
-            -- 评分与反馈
-            eval_score INTEGER,                 -- 评分 (旧版 0-10)
-            eval_comment TEXT,                  -- 评语 (旧版)
-            eval_score_super INTEGER,           -- super 评委评分 (0-100)
-            eval_comment_super TEXT,            -- super 评委评语
-            eval_score_high INTEGER,            -- high 评委评分 (0-100)
-            eval_comment_high TEXT,             -- high 评委评语
-            eval_score_low INTEGER,             -- low 评委评分 (0-100)
-            eval_comment_low TEXT,              -- low 评委评语
+            -- 评分与反馈 (五种评委，权重相同)
+            eval_score REAL,                    -- 综合评分 (0-100)
+            eval_comment TEXT,                  -- 综合评语
+            
+            eval_score_1 INTEGER,               -- 评委1 评分 (0-100)
+            eval_comment_1 TEXT,                -- 评委1 评语
+            eval_score_2 INTEGER,               -- 评委2 评分 (0-100)
+            eval_comment_2 TEXT,                -- 评委2 评语
+            eval_score_3 INTEGER,               -- 评委3 评分 (0-100)
+            eval_comment_3 TEXT,                -- 评委3 评语
+            eval_score_4 INTEGER,               -- 评委4 评分 (0-100)
+            eval_comment_4 TEXT,                -- 评委4 评语
+            eval_score_5 INTEGER,               -- 评委5 评分 (0-100)
+            eval_comment_5 TEXT,                -- 评委5 评语
             
             -- 元数据
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -67,8 +77,10 @@ def init_db():
     conn.commit()
     conn.close()
     print("数据库初始化成功！")
-    print("   - test_cases 表已创建")
-    print("   - eval_records 表已创建")
+    print("   - test_cases 表已就绪")
+    print("   - eval_records 表已更新为五模型架构")
 
 if __name__ == "__main__":
-    init_db()
+    # 如果通过命令行运行且带有 --clear 参数，则清空记录
+    clear_records = "--clear" in sys.argv
+    init_db(clear_records=clear_records)

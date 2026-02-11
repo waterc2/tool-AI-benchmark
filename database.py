@@ -98,34 +98,51 @@ def update_eval_scores(record_id, eval_results):
     conn = get_connection()
     cursor = conn.cursor()
     
-    # 计算平均分 (使用安全访问，并确保转换为数值类型)
-    super_score = float(get_safe_result(eval_results.get('super', {}), 'score', 0))
-    high_score = float(get_safe_result(eval_results.get('high', {}), 'score', 0))
-    low_score = float(get_safe_result(eval_results.get('low', {}), 'score', 0))
+    # 获取五种模型的评分 (使用 eval_score_1 到 eval_score_5)
+    # 映射: 1=gem, 2=opus, 3=gpt, 4=top2, 5=top
+    score_1 = float(get_safe_result(eval_results.get('gem', {}), 'score', 0))
+    score_2 = float(get_safe_result(eval_results.get('opus', {}), 'score', 0))
+    score_3 = float(get_safe_result(eval_results.get('gpt', {}), 'score', 0))
+    score_4 = float(get_safe_result(eval_results.get('top2', {}), 'score', 0))
+    score_5 = float(get_safe_result(eval_results.get('top', {}), 'score', 0))
     
-    # 加权平均分: Super 50%, High 30%, Low 20%
-    avg_score = (super_score * 0.5) + (high_score * 0.3) + (low_score * 0.2)
+    # 计算有效分数（忽略 0 分，即忽略失败的评测）
+    scores = [score_1, score_2, score_3, score_4, score_5]
+    valid_scores = [s for s in scores if s > 0]
+    
+    if valid_scores:
+        avg_score = sum(valid_scores) / len(valid_scores)
+    else:
+        avg_score = 0
     
     cursor.execute('''
         UPDATE eval_records
         SET eval_score = ?,
             eval_comment = ?,
-            eval_score_super = ?,
-            eval_comment_super = ?,
-            eval_score_high = ?,
-            eval_comment_high = ?,
-            eval_score_low = ?,
-            eval_comment_low = ?
+            eval_score_1 = ?,
+            eval_comment_1 = ?,
+            eval_score_2 = ?,
+            eval_comment_2 = ?,
+            eval_score_3 = ?,
+            eval_comment_3 = ?,
+            eval_score_4 = ?,
+            eval_comment_4 = ?,
+            eval_score_5 = ?,
+            eval_comment_5 = ?
         WHERE id = ?
     ''', (
         avg_score,
         "Multi-evaluator result",
-        super_score,
-        get_safe_result(eval_results.get('super', {}), 'reasoning', ""),
-        high_score,
-        get_safe_result(eval_results.get('high', {}), 'reasoning', ""),
-        low_score,
-        get_safe_result(eval_results.get('low', {}), 'reasoning', ""),
+        score_1,
+        get_safe_result(eval_results.get('gem', {}), 'reasoning', ""),
+        score_2,
+        get_safe_result(eval_results.get('opus', {}), 'reasoning', ""),
+        score_3,
+        get_safe_result(eval_results.get('gpt', {}), 'reasoning', ""),
+        score_4,
+        get_safe_result(eval_results.get('top2', {}), 'reasoning', ""),
+        score_5,
+        get_safe_result(eval_results.get('top', {}), 'reasoning', ""),
         record_id
     ))
     
@@ -145,9 +162,11 @@ def save_eval_record(data):
         'chain_of_thought', 'prompt_tokens', 'completion_tokens',
         'total_time_ms', 'tokens_per_second', 'prompt_tps', 'max_context',
         'eval_score', 'eval_comment',
-        'eval_score_super', 'eval_comment_super',
-        'eval_score_high', 'eval_comment_high',
-        'eval_score_low', 'eval_comment_low'
+        'eval_score_1', 'eval_comment_1',
+        'eval_score_2', 'eval_comment_2',
+        'eval_score_3', 'eval_comment_3',
+        'eval_score_4', 'eval_comment_4',
+        'eval_score_5', 'eval_comment_5'
     ]
     
     placeholders = ', '.join(['?' for _ in fields])
@@ -228,13 +247,24 @@ def get_stats():
     cursor = conn.cursor()
     
     stats = {}
-    # 计算三个评委的综合平均分 (Weighted Average: 50/30/20)
+    # 计算五个评委的综合平均分
     cursor.execute("""
         SELECT AVG(
-            0.5 * COALESCE(eval_score_super, eval_score*10, 0) + 
-            0.3 * COALESCE(eval_score_high, eval_score*10, 0) + 
-            0.2 * COALESCE(eval_score_low, eval_score*10, 0)
+            (COALESCE(eval_score_1, 0) + COALESCE(eval_score_2, 0) + 
+             COALESCE(eval_score_3, 0) + COALESCE(eval_score_4, 0) + 
+             COALESCE(eval_score_5, 0)) / 
+            NULLIF(
+                (CASE WHEN eval_score_1 > 0 THEN 1 ELSE 0 END) + 
+                (CASE WHEN eval_score_2 > 0 THEN 1 ELSE 0 END) + 
+                (CASE WHEN eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                (CASE WHEN eval_score_4 > 0 THEN 1 ELSE 0 END) + 
+                (CASE WHEN eval_score_5 > 0 THEN 1 ELSE 0 END), 
+                0
+            )
         ) FROM eval_records
+        WHERE (COALESCE(eval_score_1, 0) + COALESCE(eval_score_2, 0) + 
+               COALESCE(eval_score_3, 0) + COALESCE(eval_score_4, 0) + 
+               COALESCE(eval_score_5, 0)) > 0
     """)
     stats['avg_score'] = cursor.fetchone()[0] or 0
     
@@ -256,9 +286,19 @@ def get_model_summary_stats(model_type="全部"):
     conn = get_connection()
     query = """
         SELECT model_name, 
-               AVG(0.5 * COALESCE(eval_score_super, eval_score*10, 0) + 
-                   0.3 * COALESCE(eval_score_high, eval_score*10, 0) + 
-                   0.2 * COALESCE(eval_score_low, eval_score*10, 0)) as avg_score, 
+               AVG(
+                   (COALESCE(eval_score_1, 0) + COALESCE(eval_score_2, 0) + 
+                    COALESCE(eval_score_3, 0) + COALESCE(eval_score_4, 0) + 
+                    COALESCE(eval_score_5, 0)) / 
+                   NULLIF(
+                       (CASE WHEN eval_score_1 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN eval_score_2 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN eval_score_4 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN eval_score_5 > 0 THEN 1 ELSE 0 END), 
+                       0
+                   )
+               ) as avg_score, 
                COUNT(*) as test_count
         FROM eval_records
         GROUP BY model_name
@@ -282,12 +322,24 @@ def get_model_detail_stats(model_name):
     conn = get_connection()
     query = """
         SELECT c.title as case_title, 
-               AVG(0.5 * COALESCE(r.eval_score_super, r.eval_score*10, 0) + 
-                   0.3 * COALESCE(r.eval_score_high, r.eval_score*10, 0) + 
-                   0.2 * COALESCE(r.eval_score_low, r.eval_score*10, 0)) as avg_score,
-               AVG(COALESCE(r.eval_score_super, 0)) as avg_score_super,
-               AVG(COALESCE(r.eval_score_high, 0)) as avg_score_high,
-               AVG(COALESCE(r.eval_score_low, 0)) as avg_score_low,
+               AVG(
+                   (COALESCE(r.eval_score_1, 0) + COALESCE(r.eval_score_2, 0) + 
+                    COALESCE(r.eval_score_3, 0) + COALESCE(r.eval_score_4, 0) + 
+                    COALESCE(r.eval_score_5, 0)) / 
+                   NULLIF(
+                       (CASE WHEN r.eval_score_1 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN r.eval_score_2 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN r.eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN r.eval_score_4 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN r.eval_score_5 > 0 THEN 1 ELSE 0 END), 
+                       0
+                   )
+               ) as avg_score,
+               AVG(COALESCE(r.eval_score_1, 0)) as avg_score_1,
+               AVG(COALESCE(r.eval_score_2, 0)) as avg_score_2,
+               AVG(COALESCE(r.eval_score_3, 0)) as avg_score_3,
+               AVG(COALESCE(r.eval_score_4, 0)) as avg_score_4,
+               AVG(COALESCE(r.eval_score_5, 0)) as avg_score_5,
                AVG(r.completion_tokens) as avg_completion_tokens,
                AVG(r.prompt_tokens) as avg_prompt_tokens,
                AVG(r.total_time_ms) as avg_total_time_ms,
@@ -313,9 +365,19 @@ def get_case_summary_stats(model_type="全部"):
     if model_type == "全部":
         query = """
             SELECT c.id as case_id, c.title as case_title, 
-                   AVG(0.5 * COALESCE(r.eval_score_super, r.eval_score*10, 0) + 
-                       0.3 * COALESCE(r.eval_score_high, r.eval_score*10, 0) + 
-                       0.2 * COALESCE(r.eval_score_low, r.eval_score*10, 0)) as avg_score, 
+                   AVG(
+                       (COALESCE(r.eval_score_1, 0) + COALESCE(r.eval_score_2, 0) + 
+                        COALESCE(r.eval_score_3, 0) + COALESCE(r.eval_score_4, 0) + 
+                        COALESCE(r.eval_score_5, 0)) / 
+                       NULLIF(
+                           (CASE WHEN r.eval_score_1 > 0 THEN 1 ELSE 0 END) + 
+                           (CASE WHEN r.eval_score_2 > 0 THEN 1 ELSE 0 END) + 
+                           (CASE WHEN r.eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                           (CASE WHEN r.eval_score_4 > 0 THEN 1 ELSE 0 END) + 
+                           (CASE WHEN r.eval_score_5 > 0 THEN 1 ELSE 0 END), 
+                           0
+                       )
+                   ) as avg_score, 
                    COUNT(*) as total_runs
             FROM eval_records r
             JOIN test_cases c ON r.case_id = c.id
@@ -328,9 +390,17 @@ def get_case_summary_stats(model_type="全部"):
         query = """
             SELECT c.id as case_id, c.title as case_title,
                    r.model_name,
-                   0.5 * COALESCE(r.eval_score_super, r.eval_score*10, 0) + 
-                   0.3 * COALESCE(r.eval_score_high, r.eval_score*10, 0) + 
-                   0.2 * COALESCE(r.eval_score_low, r.eval_score*10, 0) as score
+                   (COALESCE(r.eval_score_1, 0) + COALESCE(r.eval_score_2, 0) + 
+                    COALESCE(r.eval_score_3, 0) + COALESCE(r.eval_score_4, 0) + 
+                    COALESCE(r.eval_score_5, 0)) / 
+                   NULLIF(
+                       (CASE WHEN r.eval_score_1 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN r.eval_score_2 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN r.eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN r.eval_score_4 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN r.eval_score_5 > 0 THEN 1 ELSE 0 END), 
+                       0
+                   ) as score
             FROM eval_records r
             JOIN test_cases c ON r.case_id = c.id
         """
@@ -358,12 +428,24 @@ def get_case_model_ranking(case_id, model_type="全部"):
     conn = get_connection()
     query = """
         SELECT model_name, 
-               AVG(COALESCE(eval_score_super, eval_score*10, 0)) as avg_score_super,
-               AVG(COALESCE(eval_score_high, eval_score*10, 0)) as avg_score_high,
-               AVG(COALESCE(eval_score_low, eval_score*10, 0)) as avg_score_low,
-               AVG(0.5 * COALESCE(eval_score_super, eval_score*10, 0) + 
-                   0.3 * COALESCE(eval_score_high, eval_score*10, 0) + 
-                   0.2 * COALESCE(eval_score_low, eval_score*10, 0)) as avg_score, 
+               AVG(COALESCE(eval_score_1, 0)) as avg_score_1,
+               AVG(COALESCE(eval_score_2, 0)) as avg_score_2,
+               AVG(COALESCE(eval_score_3, 0)) as avg_score_3,
+               AVG(COALESCE(eval_score_4, 0)) as avg_score_4,
+               AVG(COALESCE(eval_score_5, 0)) as avg_score_5,
+                AVG(
+                   (COALESCE(eval_score_1, 0) + COALESCE(eval_score_2, 0) + 
+                    COALESCE(eval_score_3, 0) + COALESCE(eval_score_4, 0) + 
+                    COALESCE(eval_score_5, 0)) / 
+                   NULLIF(
+                       (CASE WHEN eval_score_1 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN eval_score_2 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN eval_score_4 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN eval_score_5 > 0 THEN 1 ELSE 0 END), 
+                       0
+                   )
+                ) as avg_score, 
                AVG(total_time_ms) as avg_total_time_ms,
                COUNT(*) as run_count
         FROM eval_records

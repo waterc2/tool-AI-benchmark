@@ -64,16 +64,25 @@ class BackgroundTaskManager:
                 existing_record = get_eval_record_by_id(record_id)
                 eval_results = {}
                 
-                # 初始化现有值
-                for level in ["super", "high", "low"]:
+                # 初始化现有值（使用新的字段名）
+                # 映射: 1=gem, 2=opus, 3=gpt, 4=top2, 5=top
+                level_mapping = {
+                    'gem': 'eval_score_1',
+                    'opus': 'eval_score_2',
+                    'gpt': 'eval_score_3',
+                    'top2': 'eval_score_4',
+                    'top': 'eval_score_5'
+                }
+                
+                for level, db_field in level_mapping.items():
                     eval_results[level] = {
-                        "score": existing_record.get(f'eval_score_{level}', 0),
-                        "reasoning": existing_record.get(f'eval_comment_{level}', "")
+                        "score": existing_record.get(db_field, 0),
+                        "reasoning": existing_record.get(db_field.replace('eval_score_', 'eval_comment_'), "")
                     }
                 
                 # 仅针对指定级别并行调用评委
                 from concurrent.futures import ThreadPoolExecutor as EvalExecutor
-                with EvalExecutor(max_workers=3) as executor:
+                with EvalExecutor(max_workers=len(target_levels)) as executor:
                     futures = {level: executor.submit(call_evaluator, prompt, reference_answer, local_response, level) 
                                for level in target_levels}
                     for level, future in futures.items():
@@ -128,8 +137,24 @@ class BackgroundTaskManager:
 
             local_res = None
             try:
-                self.add_log("正在请求 LLM...")
-                local_res = call_llm(case['source_code'], case['prompt'], api_base, api_key, model_id)
+                # 添加重试逻辑：如果失败则尝试等待 10 秒后重试一次
+                max_retries = 1
+                for attempt in range(max_retries + 1):
+                    try:
+                        if attempt > 0:
+                            self.add_log(f"正在进行第 {attempt} 次重试...")
+                        else:
+                            self.add_log("正在请求 LLM...")
+                        
+                        local_res = call_llm(case['source_code'], case['prompt'], api_base, api_key, model_id)
+                        break  # 成功则跳出循环
+                    except Exception as e:
+                        if attempt < max_retries:
+                            self.add_log(f"⚠️ 请求失败: {str(e)}。等待 10 秒后再次尝试...")
+                            time.sleep(10)
+                        else:
+                            raise e  # 最后一次尝试还是失败，抛出异常并由外层 catch
+
                 self.add_log(f"本地模型响应成功 ({local_res['completion_tokens']} tokens)")
 
                 record_data = {
@@ -146,12 +171,16 @@ class BackgroundTaskManager:
                     "max_context": local_res.get('max_context', 0),
                     "eval_score": 0,
                     "eval_comment": "待评分",
-                    "eval_score_super": 0,
-                    "eval_comment_super": "待评分",
-                    "eval_score_high": 0,
-                    "eval_comment_high": "待评分",
-                    "eval_score_low": 0,
-                    "eval_comment_low": "待评分"
+                    "eval_score_1": 0,
+                    "eval_comment_1": "待评分",
+                    "eval_score_2": 0,
+                    "eval_comment_2": "待评分",
+                    "eval_score_3": 0,
+                    "eval_comment_3": "待评分",
+                    "eval_score_4": 0,
+                    "eval_comment_4": "待评分",
+                    "eval_score_5": 0,
+                    "eval_comment_5": "待评分"
                 }
 
                 from database import save_eval_record

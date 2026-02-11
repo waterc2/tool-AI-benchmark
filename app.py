@@ -11,9 +11,7 @@ def initialize_database():
 
 initialize_database()
 
-import os
-print(f"\n[DEBUG] App Startup - LOCAL_MODEL_URL: {os.getenv('LOCAL_MODEL_URL')}")
-print(f"[DEBUG] App Startup - LOCAL_MODEL_ID: {os.getenv('LOCAL_MODEL_ID')}")
+# 侧边栏和页面分发
 
 st.set_page_config(page_title="Local LLM Code Benchmarker", layout="wide")
 

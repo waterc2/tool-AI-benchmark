@@ -61,6 +61,10 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# Database backups
+*_backup_*.db
+eval_results_backup_*.db
+
 # Flask stuff:
 instance/
 .webassets-cache
@@ -144,6 +148,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Configuration file with API keys (generated from config.py template)
+config.py
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -205,3 +212,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# App modules
+modules/

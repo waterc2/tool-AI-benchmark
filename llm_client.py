@@ -3,11 +3,22 @@ import time
 import json
 import re
 import requests
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
-from dotenv import load_dotenv
+import config  # 使用集中配置文件
 
-load_dotenv()
+# 全局变量：用于控制不同模型的分开限制
+_model_locks = {}
+_model_locks_lock = threading.Lock()
+_last_call_times = {}
+
+def get_model_lock(model_name):
+    """获取特定模型的线程锁"""
+    with _model_locks_lock:
+        if model_name not in _model_locks:
+            _model_locks[model_name] = threading.Lock()
+        return _model_locks[model_name]
 
 def extract_cot(text):
     """
@@ -31,6 +42,23 @@ def extract_cot(text):
             
     return None, text
 
+def extract_score_from_xml(text):
+    """从 XML 标签中尝试提取评分和理由"""
+    try:
+        score_match = re.search(r'<score>\s*(\d+)\s*</score>', text, re.DOTALL | re.IGNORECASE)
+        reasoning_match = re.search(r'<reasoning>\s*(.*?)\s*</reasoning>', text, re.DOTALL | re.IGNORECASE)
+        
+        if score_match:
+            score = int(score_match.group(1))
+            reasoning = reasoning_match.group(1).strip() if reasoning_match else "No reasoning provided in XML."
+            if 0 <= score <= 100:
+                # 如果分数为 0，强制修改为 1，以区分于评分失败(0)
+                final_score = max(1, score)
+                return {"score": final_score, "reasoning": reasoning}
+    except Exception as e:
+        print(f"[DEBUG] XML extraction failed: {e}")
+    return None
+
 def extract_score_from_text(text):
     """从自然语言文本中尝试提取评分，作为 JSON 格式失败时的后备方案"""
     # 尝试匹配 "score: 85" 或 "评分: 88" 等模式
@@ -45,7 +73,9 @@ def extract_score_from_text(text):
         if match:
             score = int(match.group(1))
             if 0 <= score <= 100:
-                return {"score": score, "reasoning": text}
+                # 如果分数为 0，强制修改为 1
+                final_score = max(1, score)
+                return {"score": final_score, "reasoning": text}
     return None
 
 def robust_json_load(clean_json):
@@ -114,11 +144,10 @@ def call_llm(source_code_json, prompt, api_base=None, api_key=None, model_id=Non
     调用 LLM (本地或远端，使用标准 OpenAI 格式)
     source_code_json: 可能是单文件字符串，也可能是多文件 JSON
     """
-    # 优先使用传入的参数，否则回退到环境变量中的配置
-    # 使用 OpenRouter 作为默认配置
-    final_api_base = api_base if api_base else os.getenv("LOCAL_MODEL_URL", "https://openrouter.ai/api/v1")
-    final_api_key = api_key if api_key else os.getenv("LOCAL_MODEL_KEY", "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")
-    final_model_id = model_id if model_id else os.getenv("LOCAL_MODEL_ID", "z-ai/glm-4.5-air:free")
+    # 优先使用传入的参数，否则使用配置文件中的设置
+    final_api_base = api_base if api_base else config.LOCAL_MODEL_URL
+    final_api_key = api_key if api_key else config.LOCAL_MODEL_KEY
+    final_model_id = model_id if model_id else config.LOCAL_MODEL_ID
 
     print(f"\n[DEBUG] Calling LLM at: {final_api_base}")
     print(f"[DEBUG] Model ID: {final_model_id}")
@@ -225,6 +254,23 @@ def call_llm(source_code_json, prompt, api_base=None, api_key=None, model_id=Non
         "model_name": actual_model_name
     }
 
+def get_evaluator_model_name(evaluator_level):
+    """根据评委级别获取实际的模型 ID"""
+    if evaluator_level == "gem":
+        return config.EVALUATOR_MODEL_GEM
+    elif evaluator_level == "opus":
+        return config.EVALUATOR_MODEL_OPUS
+    elif evaluator_level == "gpt":
+        return config.EVALUATOR_MODEL_GPT
+    elif evaluator_level == "top2":
+        return config.EVALUATOR_MODEL_TOP2 # 使用 TOP2 的模型配置
+    elif evaluator_level == "grok":
+        return config.EVALUATOR_MODEL_GROK
+    elif evaluator_level == "top":
+        return config.EVALUATOR_MODEL_TOP
+    else:
+        return evaluator_level
+
 def call_evaluator(original_prompt, reference_answer, local_response, evaluator_level="high"):
     """
     调用评委大模型进行评分，包含重试逻辑
@@ -235,25 +281,39 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
 
     evaluator_level: "super" | "high" | "low"
     """
-    api_key = os.getenv("EVALUATOR_API_KEY", "123456")
-    api_base = os.getenv("EVALUATOR_BASE_URL", "http://127.0.0.1:4000")
-    model = os.getenv(f"EVALUATOR_MODEL_{evaluator_level.upper()}", evaluator_level)
+    # 根据评委级别选择对应的模型
+    model = get_evaluator_model_name(evaluator_level)
+    
+    # TOP2 评委使用 OpenRouter API 配置
+    if evaluator_level == "top2":
+        api_key = config.EVALUATOR_TOP2_API_KEY or config.OPENROUTER_API_KEY
+        api_base = config.EVALUATOR_TOP2_BASE_URL or config.OPENROUTER_API_URL
+    else:
+        # 其他评委使用本地评委 API 配置
+        api_key = config.EVALUATOR_API_KEY
+        api_base = config.EVALUATOR_BASE_URL
+    
     max_retries = 3
     retry_delay = 2  # 重试间隔秒数
+    
+    # 确定该模型的基准频率限制阈值：所有模型默认 0秒（无限制）
+    base_threshold = 0
 
     print(f"\n[DEBUG] Calling Evaluator ({evaluator_level}) at: {api_base}")
     print(f"[DEBUG] Evaluator Model: {model}")
 
     # 评委模型也设置 5 分钟超时
-
     client = OpenAI(api_key=api_key, base_url=api_base, timeout=300.0)
     
     system_prompt = f"""你是一位严谨的编程专家评委（级别：{evaluator_level}）。
 
-【重要】你必须且只能返回一个 JSON 对象，格式如下：
-{{"score": 数字(0-100), "reasoning": "评分理由"}}
+【重要】你必须将你的评分结果封装在 XML 标签中，格式如下：
+<result>
+    <score>数字(0-100)</score>
+    <reasoning>评分理由</reasoning>
+</result>
 
-禁止输出任何其他内容，禁止使用 Markdown 代码块，直接输出纯 JSON。
+禁止输出任何其他内容，禁止使用 Markdown 代码块，直接输出包含上述标签的内容。
 
 【评测任务说明】
 本地模型收到了一个编程任务，需要根据任务要求生成代码解决方案。
@@ -261,10 +321,13 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
 
 【评分标准】
 - 主要评估本地模型的回答是否正确解决了原始任务
-
 - 参考答案仅作为参考，本地模型的方案不必与参考答案完全一致
-
 - 如果本地模型的方案逻辑正确、能解决问题，即使实现方式不同也应给高分"""
+    
+    # TOP2 严格评分要求
+    if evaluator_level == "top2":
+        system_prompt += "\n- 【**TOP2 严格评分要求**】请执行严格评分：任何代码中的小错误、不符合最佳实践、或可能导致边缘情况失败的地方，都必须扣分。只有完美或接近完美的解决方案才能获得高分（90分以上）。"
+
     user_content = f"""【原始编程任务】:
 {original_prompt}
 
@@ -273,25 +336,41 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
 
 【本地模型回答】:
 {local_response}"""
+
+    # 获取模型专属锁，确保同一模型不会被过于频繁地调用
+    model_lock = get_model_lock(model)
     
     last_error = ""
     last_raw_response = ""
     last_response = None  # 保存最后一次的 response 对象
-    
     for attempt in range(max_retries + 1):
         try:
             if attempt > 0:
-                print(f"[DEBUG] Evaluator retry attempt {attempt}/{max_retries}...")
-                time.sleep(retry_delay)
+                # 错误重试间隔已在 except 块中处理
+                pass
 
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "user", "content": f"{system_prompt}\n\n{user_content}"}
-                ],
-                response_format={"type": "json_object"},
-                timeout=300.0  # 显式设置超时
-            )
+            # --- 频率限制逻辑开始 ---
+            with model_lock:
+                last_time = _last_call_times.get(model, 0)
+                elapsed = time.time() - last_time
+                if elapsed < base_threshold:
+                    wait_time = base_threshold - elapsed
+                    print(f"[频率限制] 评委模型 {model} 调用过于频繁，等待 {wait_time:.1f} 秒...")
+                    time.sleep(wait_time)
+                
+                # 更新最后调用时间（在发起请求前更新，确保后续请求能看到这个时间点）
+                _last_call_times[model] = time.time()
+
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "user", "content": f"{system_prompt}\n\n{user_content}"}
+                    ],
+                    # 移除强制 JSON 格式，以支持更多模型
+                    # response_format={"type": "json_object"},
+                    timeout=300.0  # 显式设置超时
+                )
+            # --- 频率限制逻辑结束 ---
             
             # 保存 response 对象
             last_response = response
@@ -304,11 +383,27 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
             
             # 尝试清洗可能存在的 Markdown 标签
             clean_json = raw_content
+            
+            # 优先尝试从 XML 中提取
+            xml_result = extract_score_from_xml(raw_content)
+            if xml_result:
+                print(f"[DEBUG] XML extraction successful for {evaluator_level}")
+                return xml_result
 
-            if "```json" in raw_content:
-                clean_json = re.search(r'```json\s*(.*?)\s*```', raw_content, re.DOTALL).group(1)
-            elif "```" in raw_content:
-                clean_json = re.search(r'```\s*(.*?)\s*```', raw_content, re.DOTALL).group(1)
+            # 首先判断是否已经是合法的 JSON，如果是则跳过清洗，避免误伤（如理由中包含 ```）
+            try:
+                json.loads(raw_content)
+                # 如果能直接解析成功，说明不需要清洗
+            except json.JSONDecodeError:
+                # 只有在解析失败时才尝试提取 Markdown 代码块
+                if "```json" in raw_content:
+                    json_match = re.search(r'```json\s*(.*?)\s*```', raw_content, re.DOTALL)
+                    if json_match:
+                        clean_json = json_match.group(1)
+                elif "```" in raw_content:
+                    code_match = re.search(r'```\s*(.*?)\s*```', raw_content, re.DOTALL)
+                    if code_match:
+                        clean_json = code_match.group(1)
             
             # 修复JSON中的控制字符问题：尝试鲁棒解析
             try:
@@ -362,47 +457,64 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
             # 验证分数范围
             if not (0 <= result['score'] <= 100):
                 print(f"[DEBUG] Score out of range: {result['score']}")
-
                 result['score'] = max(0, min(100, result['score']))
+
+            # 如果分数为 0，强制修改为 1
+            if result['score'] == 0:
+                result['score'] = 1
 
             return result
 
         except Exception as e:
             last_error = str(e)
-            print(f"[DEBUG] Evaluator attempt {attempt} failed: {last_error}")
+            print(f"[DEBUG] Evaluator attempt {attempt} 失败: {last_error}")
 
             if last_response and hasattr(last_response, 'choices'):
                 print(f"[DEBUG] Raw response content: {last_response.choices[0].message.content}")
 
+            # 如果出错，不增加额外的冷却惩罚
+            with model_lock:
+                # 直接更新最后调用时间，不增加额外延时
+                _last_call_times[model] = time.time()
+
+            if attempt < max_retries:
+                print(f"[错误重试] 评委模型 {model} 尝试失败，等待 10 秒后进行下次重试...")
+                time.sleep(10)
+            
             continue
             
     error_msg = f"评委调用在 {max_retries} 次重试后仍然失败: {last_error}"
 
+    # 最终失败时，不增加额外的冷却惩罚
+    with model_lock:
+        # 直接更新最后调用时间，不增加额外延时
+        _last_call_times[model] = time.time()
+
     if last_raw_response:
         error_msg += f"\nAPI返回详情: {last_raw_response}"
+        # 将原始响应输出到控制台，方便调试
+        print(f"\n[ERROR] 原始响应内容（无法解析）:")
+        print("=" * 80)
+        print(last_raw_response)
+        print("=" * 80)
 
     return {"score": 0, "reasoning": error_msg}
 
 def call_all_evaluators(original_prompt, reference_answer, local_response):
     """
-    并行调用所有三个评委模型进行评分
-    返回: {"super": {...}, "high": {...}, "low": {...}}
+    并行调用所有评分级别
+    由于 call_evaluator 内部有按模型名称的全局频率限制，这里可以直接简单并行
     """
     results = {}
+    levels = ["gem", "opus", "gpt", "top2", "top"] # 将 grok 替换为 top2
     
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {}
-        for level in ["super", "high", "low"]:
-            print(f">>> 正在并行提交评委 [{level}]...")
-            future = executor.submit(call_evaluator, original_prompt, reference_answer, local_response, level)
-            futures[level] = future
-        
+    with ThreadPoolExecutor(max_workers=len(levels)) as executor:
+        futures = {level: executor.submit(call_evaluator, original_prompt, reference_answer, local_response, level) 
+                   for level in levels}
         for level, future in futures.items():
             try:
                 results[level] = future.result()
-                print(f">>> 评委 [{level}] 完成评分")
             except Exception as e:
-                print(f">>> 评委 [{level}] 失败: {str(e)}")
                 results[level] = {"score": 0, "reasoning": f"评委调用失败: {str(e)}"}
     
     return results
