@@ -4,6 +4,11 @@ Configuration Verification Script - Check if all configurations are properly set
 """
 import os
 import sys
+import io
+
+# 修复 Windows PowerShell 编码问题
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 def check_file_exists(filepath, description):
     """检查文件是否存在"""
@@ -106,11 +111,45 @@ def main():
     print(f"✅ EVALUATOR_MODEL_GEM: {config.EVALUATOR_MODEL_GEM}")
     print(f"✅ EVALUATOR_MODEL_OPUS: {config.EVALUATOR_MODEL_OPUS}")
     print(f"✅ EVALUATOR_MODEL_GPT: {config.EVALUATOR_MODEL_GPT}")
-    print(f"✅ EVALUATOR_MODEL_GROK: {config.EVALUATOR_MODEL_GROK}")
+    print(f"✅ EVALUATOR_MODEL_TOP2: {config.EVALUATOR_MODEL_TOP2}")
     print(f"✅ EVALUATOR_MODEL_TOP: {config.EVALUATOR_MODEL_TOP}")
     print()
     
-    # 5. 检查 .gitignore
+    # 5. 检查 NVIDIA 配置
+    print("🌤️ 检查 NVIDIA 配置...")
+    if config.NVIDIA_API_URL:
+        print(f"✅ NVIDIA_API_URL: {config.NVIDIA_API_URL}")
+    else:
+        print("❌ NVIDIA_API_URL: 未设置")
+        all_ok = False
+        
+    if config.NVIDIA_API_KEY:
+        display_key = config.NVIDIA_API_KEY[:8] + "..." if len(config.NVIDIA_API_KEY) > 8 else "***"
+        print(f"✅ NVIDIA_API_KEY: {display_key}")
+    else:
+        print("❌ NVIDIA_API_KEY: 未设置")
+        all_ok = False
+        
+    print(f"✅ NVIDIA_MODEL_ID: {config.NVIDIA_MODEL_ID}")
+    print()
+    
+    # 6. 检查 LiteLLM 配置
+    print("🚀 检查 LiteLLM 配置...")
+    if config.LITELLM_API_URL:
+        print(f"✅ LITELLM_API_URL: {config.LITELLM_API_URL}")
+    else:
+        print("❌ LITELLM_API_URL: 未设置")
+        all_ok = False
+        
+    if config.LITELLM_API_KEY:
+        display_key = config.LITELLM_API_KEY[:8] + "..." if len(config.LITELLM_API_KEY) > 8 else "***"
+        print(f"✅ LITELLM_API_KEY: {display_key}")
+    else:
+        print("❌ LITELLM_API_KEY: 未设置")
+        all_ok = False
+    print()
+    
+    # 7. 检查 .gitignore 安全设置...
     print("🔒 检查 .gitignore 安全设置...")
     gitignore_ok = True
     if os.path.exists(".gitignore"):

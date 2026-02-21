@@ -152,9 +152,9 @@ def call_llm(source_code_json, prompt, api_base=None, api_key=None, model_id=Non
     print(f"\n[DEBUG] Calling LLM at: {final_api_base}")
     print(f"[DEBUG] Model ID: {final_model_id}")
 
-    # 设置超时时间：连接超时 10 秒，读取超时 600 秒 (10 分钟)
+    # 设置超时时间：连接超时 10 秒，读取超时 300 秒 (5 分钟)
     # 这样可以防止在网络连接失败时卡住太久
-    client = OpenAI(api_key=final_api_key, base_url=final_api_base, timeout=(10.0, 600.0))
+    client = OpenAI(api_key=final_api_key, base_url=final_api_base, timeout=(10.0, 300.0))
 
     # 处理多文件上下文
     context = ""
@@ -186,11 +186,17 @@ def call_llm(source_code_json, prompt, api_base=None, api_key=None, model_id=Non
     actual_model_name = final_model_id  # 默认使用配置的模型名
 
     # 使用流式输出以精确计算生成速度 (TPS)
+    # 为 Qwen 模型添加 enable_thinking 参数
+    extra_body = None
+    if final_api_base and "dashscope" in final_api_base:
+        extra_body = {"enable_thinking": True}
+    
     response_stream = client.chat.completions.create(
         model=final_model_id,
         messages=[{"role": "user", "content": full_prompt}],
         stream=True,
-        stream_options={"include_usage": True}
+        stream_options={"include_usage": True},
+        extra_body=extra_body
     )
     
     prompt_tokens = 0
@@ -506,7 +512,8 @@ def call_all_evaluators(original_prompt, reference_answer, local_response):
     由于 call_evaluator 内部有按模型名称的全局频率限制，这里可以直接简单并行
     """
     results = {}
-    levels = ["gem", "opus", "gpt", "top2", "top"] # 将 grok 替换为 top2
+    # top2 使用 Qwen 模型进行严格评分
+    levels = ["gem", "opus", "gpt", "top2", "top"]
     
     with ThreadPoolExecutor(max_workers=len(levels)) as executor:
         futures = {level: executor.submit(call_evaluator, original_prompt, reference_answer, local_response, level) 
