@@ -111,7 +111,6 @@ def main():
     print(f"✅ EVALUATOR_MODEL_GEM: {config.EVALUATOR_MODEL_GEM}")
     print(f"✅ EVALUATOR_MODEL_OPUS: {config.EVALUATOR_MODEL_OPUS}")
     print(f"✅ EVALUATOR_MODEL_GPT: {config.EVALUATOR_MODEL_GPT}")
-    print(f"✅ EVALUATOR_MODEL_TOP2: {config.EVALUATOR_MODEL_TOP2}")
     print(f"✅ EVALUATOR_MODEL_TOP: {config.EVALUATOR_MODEL_TOP}")
     print()
     

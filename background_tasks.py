@@ -9,6 +9,23 @@ def get_safe_result(res, key, default):
     return res.get(key, default) if isinstance(res, dict) else default
 
 
+def is_local_model(api_base):
+    """
+    判断是否为本地模型（基于 API 地址）
+    
+    Args:
+        api_base: API 基础地址
+        
+    Returns:
+        bool: True 表示本地模型，False 表示远端模型
+    """
+    if not api_base:
+        return True  # 无 API 地址时默认使用本地配置
+    
+    local_keywords = ['localhost', '127.0.0.1', '10.', '192.168.', '0.0.0.0']
+    return any(kw in api_base for kw in local_keywords)
+
+
 class BackgroundTaskManager:
     def __init__(self):
         self.is_running = False
@@ -78,7 +95,6 @@ class BackgroundTaskManager:
                     'gem': 'eval_score_1',
                     'opus': 'eval_score_2',
                     'gpt': 'eval_score_3',
-                    'top2': 'eval_score_4',
                     'top': 'eval_score_5'
                 }
                 
@@ -209,51 +225,79 @@ class BackgroundTaskManager:
         # self.pending_evals = 0
         # self.completed_evals = 0
 
-        # 使用 Future 对象跟踪所有任务
-        futures = {}
-        
-        for idx, case in enumerate(selected_cases):
-            if self.stop_requested:
-                self.add_log("🛑 任务被用户停止")
-                break
+        # 判断是否为本地模型
+        local_model = is_local_model(api_base)
+        execution_mode = "串行" if local_model else "并发"
+        self.add_log(f"🔧 执行模式: {execution_mode} (模型地址: {api_base or '本地默认'})")
 
-            # 提交任务到 LLM 线程池
-            future = self.llm_executor.submit(
-                self.process_single_case, 
-                case, 
-                api_base, 
-                api_key, 
-                model_id
-            )
-            futures[future] = idx
-            
-            # 每个任务之间间隔 2 秒
-            if idx < len(selected_cases) - 1 and not self.stop_requested:
-                time.sleep(2)
+        if local_model:
+            # ========== 本地模型：串行执行 ==========
+            for idx, case in enumerate(selected_cases):
+                if self.stop_requested:
+                    self.add_log("🛑 任务被用户停止")
+                    break
 
-        # 等待所有 LLM 任务完成
-        for future in as_completed(futures):
-            if self.stop_requested:
-                future.cancel()
-                break
-            
-            try:
-                success = future.result()
+                self.add_log(f"📋 处理用例 {idx + 1}/{self.total_cases}")
+                success = self.process_single_case(case, api_base, api_key, model_id)
+
                 if success:
                     self.completed_cases += 1
                 else:
                     self.failed_cases += 1
                     self.completed_cases += 1
-            except Exception as e:
-                self.add_log(f"❌ 任务执行异常：{str(e)}")
-                self.failed_cases += 1
-                self.completed_cases += 1
-            
-            self.progress = self.completed_cases / self.total_cases
 
-        self.is_running = False
-        self.status = f"测试完成，等待评分 ({self.completed_evals}/{self.pending_evals})"
-        self.progress = 1.0
+                self.progress = self.completed_cases / self.total_cases
+
+            self.is_running = False
+            self.status = f"测试完成，等待评分 ({self.completed_evals}/{self.pending_evals})"
+            self.progress = 1.0
+
+        else:
+            # ========== 远端模型：并发执行 ==========
+            futures = {}
+
+            for idx, case in enumerate(selected_cases):
+                if self.stop_requested:
+                    self.add_log("🛑 任务被用户停止")
+                    break
+
+                # 提交任务到 LLM 线程池
+                future = self.llm_executor.submit(
+                    self.process_single_case,
+                    case,
+                    api_base,
+                    api_key,
+                    model_id
+                )
+                futures[future] = idx
+
+                # 每个任务之间间隔 2 秒
+                if idx < len(selected_cases) - 1 and not self.stop_requested:
+                    time.sleep(2)
+
+            # 等待所有 LLM 任务完成
+            for future in as_completed(futures):
+                if self.stop_requested:
+                    future.cancel()
+                    break
+
+                try:
+                    success = future.result()
+                    if success:
+                        self.completed_cases += 1
+                    else:
+                        self.failed_cases += 1
+                        self.completed_cases += 1
+                except Exception as e:
+                    self.add_log(f"❌ 任务执行异常：{str(e)}")
+                    self.failed_cases += 1
+                    self.completed_cases += 1
+
+                self.progress = self.completed_cases / self.total_cases
+
+            self.is_running = False
+            self.status = f"测试完成，等待评分 ({self.completed_evals}/{self.pending_evals})"
+            self.progress = 1.0
 
         # 显示最终统计
         if self.failed_cases > 0:

@@ -512,8 +512,8 @@ def call_all_evaluators(original_prompt, reference_answer, local_response):
     由于 call_evaluator 内部有按模型名称的全局频率限制，这里可以直接简单并行
     """
     results = {}
-    # top2 使用 Qwen 模型进行严格评分
-    levels = ["gem", "opus", "gpt", "top2", "top"]
+    # top2 已禁用，不参与评分
+    levels = ["gem", "opus", "gpt", "top"]
     
     with ThreadPoolExecutor(max_workers=len(levels)) as executor:
         futures = {level: executor.submit(call_evaluator, original_prompt, reference_answer, local_response, level) 
