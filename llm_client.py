@@ -290,14 +290,9 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
     # 根据评委级别选择对应的模型
     model = get_evaluator_model_name(evaluator_level)
     
-    # TOP2 评委使用 OpenRouter API 配置
-    if evaluator_level == "top2":
-        api_key = config.EVALUATOR_TOP2_API_KEY or config.OPENROUTER_API_KEY
-        api_base = config.EVALUATOR_TOP2_BASE_URL or config.OPENROUTER_API_URL
-    else:
-        # 其他评委使用本地评委 API 配置
-        api_key = config.EVALUATOR_API_KEY
-        api_base = config.EVALUATOR_BASE_URL
+    # 所有评委使用相同的 API 配置
+    api_key = config.EVALUATOR_API_KEY
+    api_base = config.EVALUATOR_BASE_URL
     
     max_retries = 3
     retry_delay = 2  # 重试间隔秒数
@@ -308,8 +303,8 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
     print(f"\n[DEBUG] Calling Evaluator ({evaluator_level}) at: {api_base}")
     print(f"[DEBUG] Evaluator Model: {model}")
 
-    # 评委模型也设置 5 分钟超时
-    client = OpenAI(api_key=api_key, base_url=api_base, timeout=300.0)
+    # 评委模型设置 120 秒超时
+    client = OpenAI(api_key=api_key, base_url=api_base, timeout=120.0)
     
     system_prompt = f"""你是一位严谨的编程专家评委（级别：{evaluator_level}）。
 
@@ -326,14 +321,10 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
 你的任务是评估本地模型的回答是否正确解决了原始问题。
 
 【评分标准】
+- 【严格评分要求】请执行严格评分：任何代码中的小错误、不符合最佳实践、或可能导致边缘情况失败的地方，都必须扣分。只有完美或接近完美的解决方案才能获得高分（90 分以上）。
 - 主要评估本地模型的回答是否正确解决了原始任务
-- 参考答案仅作为参考，本地模型的方案不必与参考答案完全一致
-- 如果本地模型的方案逻辑正确、能解决问题，即使实现方式不同也应给高分"""
+- 参考答案仅作为参考，本地模型的方案不必与参考答案完全一致"""
     
-    # TOP2 严格评分要求
-    if evaluator_level == "top2":
-        system_prompt += "\n- 【**TOP2 严格评分要求**】请执行严格评分：任何代码中的小错误、不符合最佳实践、或可能导致边缘情况失败的地方，都必须扣分。只有完美或接近完美的解决方案才能获得高分（90分以上）。"
-
     user_content = f"""【原始编程任务】:
 {original_prompt}
 
@@ -374,7 +365,7 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
                     ],
                     # 移除强制 JSON 格式，以支持更多模型
                     # response_format={"type": "json_object"},
-                    timeout=300.0  # 显式设置超时
+                    timeout=120.0  # 显式设置超时
                 )
             # --- 频率限制逻辑结束 ---
             

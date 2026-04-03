@@ -107,8 +107,8 @@ def update_eval_scores(record_id, eval_results):
     score_5 = float(get_safe_result(eval_results.get('top', {}), 'score', 0))
     
     # 计算有效分数（忽略 0 分，即忽略失败的评测）
-    # 排除 top2 (score_4) 的评分计入平均分 (gem, opus, gpt, top)
-    scores = [score_1, score_2, score_3, score_5]  # 排除 score_4 (top2)
+    # 包含所有五种模型的评分计入平均分 (gem, opus, gpt, top2, top)
+    scores = [score_1, score_2, score_3, score_4, score_5]
     valid_scores = [s for s in scores if s > 0]
     
     if valid_scores:
@@ -244,26 +244,29 @@ def get_all_models():
 @st.cache_data(ttl=10)
 def get_stats():
     """获取全局统计指标"""
+    stats = {}
     conn = get_connection()
     cursor = conn.cursor()
     
-    stats = {}
     # 计算五个评委的综合平均分 (gem, opus, gpt, top2, top)
     cursor.execute("""
         SELECT AVG(
             (COALESCE(eval_score_1, 0) + COALESCE(eval_score_2, 0) + 
              COALESCE(eval_score_3, 0) + 
+             COALESCE(eval_score_4, 0) +
              COALESCE(eval_score_5, 0)) / 
             NULLIF(
                 (CASE WHEN eval_score_1 > 0 THEN 1 ELSE 0 END) + 
                 (CASE WHEN eval_score_2 > 0 THEN 1 ELSE 0 END) + 
                 (CASE WHEN eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                (CASE WHEN eval_score_4 > 0 THEN 1 ELSE 0 END) +
                 (CASE WHEN eval_score_5 > 0 THEN 1 ELSE 0 END), 
                 0
             )
         ) FROM eval_records
         WHERE (COALESCE(eval_score_1, 0) + COALESCE(eval_score_2, 0) + 
                COALESCE(eval_score_3, 0) + 
+               COALESCE(eval_score_4, 0) +
                COALESCE(eval_score_5, 0)) > 0
     """)
     stats['avg_score'] = cursor.fetchone()[0] or 0
@@ -289,11 +292,13 @@ def get_model_summary_stats(model_type="全部"):
                AVG(
                    (COALESCE(eval_score_1, 0) + COALESCE(eval_score_2, 0) + 
                     COALESCE(eval_score_3, 0) + 
+                    COALESCE(eval_score_4, 0) +
                     COALESCE(eval_score_5, 0)) / 
                    NULLIF(
                        (CASE WHEN eval_score_1 > 0 THEN 1 ELSE 0 END) + 
                        (CASE WHEN eval_score_2 > 0 THEN 1 ELSE 0 END) + 
                        (CASE WHEN eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN eval_score_4 > 0 THEN 1 ELSE 0 END) +
                        (CASE WHEN eval_score_5 > 0 THEN 1 ELSE 0 END), 
                        0
                    )
@@ -324,11 +329,13 @@ def get_model_detail_stats(model_name):
                AVG(
                    (COALESCE(r.eval_score_1, 0) + COALESCE(r.eval_score_2, 0) + 
                     COALESCE(r.eval_score_3, 0) + 
+                    COALESCE(r.eval_score_4, 0) +
                     COALESCE(r.eval_score_5, 0)) / 
                    NULLIF(
                        (CASE WHEN r.eval_score_1 > 0 THEN 1 ELSE 0 END) + 
                        (CASE WHEN r.eval_score_2 > 0 THEN 1 ELSE 0 END) + 
                        (CASE WHEN r.eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN r.eval_score_4 > 0 THEN 1 ELSE 0 END) +
                        (CASE WHEN r.eval_score_5 > 0 THEN 1 ELSE 0 END), 
                        0
                    )
@@ -336,6 +343,7 @@ def get_model_detail_stats(model_name):
                AVG(COALESCE(r.eval_score_1, 0)) as avg_score_1,
                AVG(COALESCE(r.eval_score_2, 0)) as avg_score_2,
                AVG(COALESCE(r.eval_score_3, 0)) as avg_score_3,
+               AVG(COALESCE(r.eval_score_4, 0)) as avg_score_4,
                AVG(COALESCE(r.eval_score_5, 0)) as avg_score_5,
                AVG(r.completion_tokens) as avg_completion_tokens,
                AVG(r.prompt_tokens) as avg_prompt_tokens,
@@ -365,11 +373,13 @@ def get_case_summary_stats(model_type="全部"):
                    AVG(
                        (COALESCE(r.eval_score_1, 0) + COALESCE(r.eval_score_2, 0) + 
                         COALESCE(r.eval_score_3, 0) + 
+                        COALESCE(r.eval_score_4, 0) +
                         COALESCE(r.eval_score_5, 0)) / 
                        NULLIF(
                            (CASE WHEN r.eval_score_1 > 0 THEN 1 ELSE 0 END) + 
                            (CASE WHEN r.eval_score_2 > 0 THEN 1 ELSE 0 END) + 
                            (CASE WHEN r.eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                           (CASE WHEN r.eval_score_4 > 0 THEN 1 ELSE 0 END) +
                            (CASE WHEN r.eval_score_5 > 0 THEN 1 ELSE 0 END), 
                            0
                        )
@@ -388,11 +398,13 @@ def get_case_summary_stats(model_type="全部"):
                    r.model_name,
                    (COALESCE(r.eval_score_1, 0) + COALESCE(r.eval_score_2, 0) + 
                     COALESCE(r.eval_score_3, 0) + 
+                    COALESCE(r.eval_score_4, 0) +
                     COALESCE(r.eval_score_5, 0)) / 
                    NULLIF(
                        (CASE WHEN r.eval_score_1 > 0 THEN 1 ELSE 0 END) + 
                        (CASE WHEN r.eval_score_2 > 0 THEN 1 ELSE 0 END) + 
                        (CASE WHEN r.eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN r.eval_score_4 > 0 THEN 1 ELSE 0 END) +
                        (CASE WHEN r.eval_score_5 > 0 THEN 1 ELSE 0 END), 
                        0
                    ) as score
@@ -426,15 +438,18 @@ def get_case_model_ranking(case_id, model_type="全部"):
                AVG(COALESCE(eval_score_1, 0)) as avg_score_1,
                AVG(COALESCE(eval_score_2, 0)) as avg_score_2,
                AVG(COALESCE(eval_score_3, 0)) as avg_score_3,
+               AVG(COALESCE(eval_score_4, 0)) as avg_score_4,
                AVG(COALESCE(eval_score_5, 0)) as avg_score_5,
                 AVG(
                    (COALESCE(eval_score_1, 0) + COALESCE(eval_score_2, 0) + 
                     COALESCE(eval_score_3, 0) + 
+                    COALESCE(eval_score_4, 0) +
                     COALESCE(eval_score_5, 0)) / 
                    NULLIF(
                        (CASE WHEN eval_score_1 > 0 THEN 1 ELSE 0 END) + 
                        (CASE WHEN eval_score_2 > 0 THEN 1 ELSE 0 END) + 
                        (CASE WHEN eval_score_3 > 0 THEN 1 ELSE 0 END) + 
+                       (CASE WHEN eval_score_4 > 0 THEN 1 ELSE 0 END) +
                        (CASE WHEN eval_score_5 > 0 THEN 1 ELSE 0 END), 
                        0
                    )

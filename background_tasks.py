@@ -203,8 +203,8 @@ class BackgroundTaskManager:
             self.add_log(f"✅ 用例 '{self.current_case}' 本地测试完成，已保存 (记录 ID: {record_id})")
 
             self.pending_evals += 1
-            self.eval_executor.submit(self.async_evaluate_and_save, case, local_res, record_id)
-            self.add_log(f"🚀 已提交用例 '{self.current_case}' 到异步评分队列")
+            # self.eval_executor.submit(self.async_evaluate_and_save, case, local_res, record_id)
+            self.add_log(f"🚀 已提交用例 '{self.current_case}' 到异步评分队列 (已禁用自动评分)")
 
         except Exception as e:
             self.add_log(f"❌ 执行失败：{str(e)}")
