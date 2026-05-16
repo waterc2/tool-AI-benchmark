@@ -31,7 +31,7 @@
 **修改的文件：**
 
 #### `llm_client.py`
-- 移除了硬编码的 OpenRouter API 密钥: `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`
+- 移除了硬编码的 OpenRouter API 密钥: `sk-or-v1-xxxx...xxxx`
 - 移除了硬编码的评委 API 密钥: `123456`
 - 现在使用 `config` 模块统一管理配置
 

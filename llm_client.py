@@ -8,6 +8,62 @@ from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 import config  # 使用集中配置文件
 
+
+def _is_gemini_endpoint(base_url):
+    """判断 base_url 是否指向 Gemini 原生 API"""
+    if not base_url:
+        return False
+    return "generativelanguage.googleapis.com" in base_url
+
+
+def _call_gemini_native(api_key, model, prompt_text, timeout=60):
+    """
+    使用 Gemini 原生 REST API 格式调用 generateContent
+    返回一个模拟 OpenAI response 结构的对象，以兼容现有解析逻辑
+    """
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt_text}
+                ]
+            }
+        ]
+    }
+    resp = requests.post(url, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+
+    # 提取文本内容
+    text = ""
+    candidates = data.get("candidates", [])
+    if candidates:
+        parts = candidates[0].get("content", {}).get("parts", [])
+        for p in parts:
+            if "text" in p:
+                text += p["text"]
+
+    # 构造模拟 OpenAI 结构
+    class FakeMessage:
+        def __init__(self, content):
+            self.content = content
+            self.role = "assistant"
+
+    class FakeChoice:
+        def __init__(self, message):
+            self.message = message
+            self.index = 0
+            self.finish_reason = "stop"
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(FakeMessage(content))]
+            self.model = model
+            self.usage = None
+
+    return FakeResponse(text)
+
 # 全局变量：用于控制不同模型的分开限制
 _model_locks = {}
 _model_locks_lock = threading.Lock()
@@ -19,6 +75,56 @@ def get_model_lock(model_name):
         if model_name not in _model_locks:
             _model_locks[model_name] = threading.Lock()
         return _model_locks[model_name]
+
+def get_evaluator_system_prompt(evaluator_level="high"):
+    """获取评分模型的系统提示词
+    
+    Args:
+        evaluator_level: 评委级别
+        
+    Returns:
+        str: 系统提示词
+    """
+    return f"""你是一位严谨的编程专家评委（级别：{evaluator_level}）。
+
+【重要】你必须将你的评分结果封装在 XML 标签中，格式如下：
+<result>
+    <score>数字(0-100)</score>
+    <reasoning>评分理由</reasoning>
+</result>
+
+禁止输出任何其他内容，禁止使用 Markdown 代码块，直接输出包含上述标签的内容。
+
+【评测任务说明】
+本地模型收到了一个编程任务，需要根据任务要求生成代码解决方案。
+你的任务是评估本地模型的回答是否正确解决了原始问题。
+
+【评分标准】
+- 【严格评分要求】请执行严格评分：任何代码中的小错误、不符合最佳实践、或可能导致边缘情况失败的地方，都必须扣分。只有完美或接近完美的解决方案才能获得高分（90 分以上）。
+- 主要评估本地模型的回答是否正确解决了原始任务
+- 参考答案仅作为参考，本地模型的方案不必与参考答案完全一致"""
+
+
+def get_evaluator_user_content(original_prompt, reference_answer, local_response):
+    """获取评分模型的用户内容
+    
+    Args:
+        original_prompt: 原始编程任务
+        reference_answer: 参考答案
+        local_response: 本地模型回答
+        
+    Returns:
+        str: 用户内容
+    """
+    return f"""【原始编程任务】:
+{original_prompt}
+
+【参考答案】:
+{reference_answer}
+
+【本地模型回答】:
+{local_response}"""
+
 
 def extract_cot(text):
     """
@@ -129,13 +235,12 @@ def get_llama_props(api_base):
         return {}
 
     try:
-        # 假设 api_base 是 http://.../v1，我们需要去掉 /v1
         base_url = api_base.replace("/v1", "")
-        # 设置极短的超时，避免阻塞
-        resp = requests.get(f"{base_url}/props", timeout=1)
+        resp = requests.get(f"{base_url}/props", timeout=3)
         if resp.status_code == 200:
-            return resp.json()
-    except:
+            props_data = resp.json()
+            return props_data
+    except Exception:
         pass
     return {}
 
@@ -185,6 +290,12 @@ def call_llm(source_code_json, prompt, api_base=None, api_key=None, model_id=Non
     full_content = ""
     actual_model_name = final_model_id  # 默认使用配置的模型名
 
+    # 当模型 ID 是通用占位符（如 "local"、空字符串）或请求的是本地 API 时，允许从流式响应中获取真实模型名
+    # 对于用户明确指定的模型名，保持不变以避免历史记录与 API 返回不一致
+    generic_model_ids = {"local", "", "model", "default"}
+    local_api = final_api_base and any(kw in final_api_base for kw in ["localhost", "127.0.0.1", "10.", "192.168.", "0.0.0.0"])
+    allow_model_from_stream = (final_model_id.lower() in generic_model_ids) or local_api
+
     # 使用流式输出以精确计算生成速度 (TPS)
     # 为 Qwen 模型添加 enable_thinking 参数
     extra_body = None
@@ -203,8 +314,8 @@ def call_llm(source_code_json, prompt, api_base=None, api_key=None, model_id=Non
     completion_tokens = 0
 
     for chunk in response_stream:
-        # 尝试从第一个 chunk 获取实际的模型名称
-        if hasattr(chunk, 'model') and chunk.model:
+        # 仅在允许的情况下，从流式响应覆盖模型名称
+        if allow_model_from_stream and hasattr(chunk, 'model') and chunk.model:
             actual_model_name = chunk.model
             
         if chunk.choices and len(chunk.choices) > 0:
@@ -226,14 +337,21 @@ def call_llm(source_code_json, prompt, api_base=None, api_key=None, model_id=Non
 
     duration_ms = (end_time - start_time) * 1000
     
-    print(f"[DEBUG] Post-processing response...")
     raw_content = full_content
     cot, clean_content = extract_cot(raw_content)
 
     # 尝试获取 llama.cpp 的额外指标
-    print(f"[DEBUG] Fetching llama props (if local)...")
     props = get_llama_props(final_api_base)
     max_context = props.get("n_ctx", 0)
+    
+    # 如果流式响应中没有获取到真实模型名，尝试从 llama.cpp props 中获取
+    if actual_model_name == final_model_id and props:
+        llama_model = props.get("model") or props.get("model_name") or ""
+        if llama_model:
+            # 从文件路径中提取模型名称（例如 "models/Qwen3.6-27B-UD-Q4_K_XL.gguf" -> "Qwen3.6-27B-UD-Q4_K_XL.gguf"）
+            actual_model_name = llama_model.split("/")[-1].split("\\")[-1]
+            if actual_model_name:
+                print(f"[DEBUG] Got model name from llama.cpp props: {actual_model_name}")
     
     # 真正的生成速度应该排除掉 Prompt Processing (预读) 的时间
     # 生成耗时 = 结束时间 - 首字时间
@@ -247,7 +365,7 @@ def call_llm(source_code_json, prompt, api_base=None, api_key=None, model_id=Non
     else:
         prompt_tps = 0
     
-    print(f"[DEBUG] Finalizing response object...")
+    print(f"[DEBUG] Final model_name: {actual_model_name}")
     return {
         "content": clean_content,
         "chain_of_thought": cot,
@@ -290,11 +408,32 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
     # 根据评委级别选择对应的模型
     model = get_evaluator_model_name(evaluator_level)
     
-    # 所有评委使用相同的 API 配置
-    api_key = config.EVALUATOR_API_KEY
-    api_base = config.EVALUATOR_BASE_URL
+    # 每个评委模型使用独立的 API 配置
+    if evaluator_level == "gem":
+        api_key = config.EVALUATOR_GEM_API_KEY
+        api_base = config.EVALUATOR_GEM_BASE_URL
+    elif evaluator_level == "opus":
+        api_key = config.EVALUATOR_OPUS_API_KEY
+        api_base = config.EVALUATOR_OPUS_BASE_URL
+    elif evaluator_level == "gpt":
+        api_key = config.EVALUATOR_GPT_API_KEY
+        api_base = config.EVALUATOR_GPT_BASE_URL
+    elif evaluator_level == "top2":
+        api_key = config.EVALUATOR_TOP2_API_KEY
+        api_base = config.EVALUATOR_TOP2_BASE_URL
+    elif evaluator_level == "top":
+        api_key = config.EVALUATOR_TOP_API_KEY
+        api_base = config.EVALUATOR_TOP_BASE_URL
+    else:
+        # 默认使用 Gem 配置
+        api_key = config.EVALUATOR_GEM_API_KEY
+        api_base = config.EVALUATOR_GEM_BASE_URL
     
-    max_retries = 3
+    # 验证 API Key 是否已配置
+    if not api_key:
+        raise ValueError(f"评分模型 {evaluator_level} 的 API Key 未配置，请检查 .env 文件")
+    
+    max_retries = 2
     retry_delay = 2  # 重试间隔秒数
     
     # 确定该模型的基准频率限制阈值：所有模型默认 0秒（无限制）
@@ -303,36 +442,14 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
     print(f"\n[DEBUG] Calling Evaluator ({evaluator_level}) at: {api_base}")
     print(f"[DEBUG] Evaluator Model: {model}")
 
-    # 评委模型设置 120 秒超时
-    client = OpenAI(api_key=api_key, base_url=api_base, timeout=120.0)
+    # 评委模型设置 60 秒超时
+    is_gemini = _is_gemini_endpoint(api_base)
+    if not is_gemini:
+        client = OpenAI(api_key=api_key, base_url=api_base, timeout=60.0)
     
-    system_prompt = f"""你是一位严谨的编程专家评委（级别：{evaluator_level}）。
-
-【重要】你必须将你的评分结果封装在 XML 标签中，格式如下：
-<result>
-    <score>数字(0-100)</score>
-    <reasoning>评分理由</reasoning>
-</result>
-
-禁止输出任何其他内容，禁止使用 Markdown 代码块，直接输出包含上述标签的内容。
-
-【评测任务说明】
-本地模型收到了一个编程任务，需要根据任务要求生成代码解决方案。
-你的任务是评估本地模型的回答是否正确解决了原始问题。
-
-【评分标准】
-- 【严格评分要求】请执行严格评分：任何代码中的小错误、不符合最佳实践、或可能导致边缘情况失败的地方，都必须扣分。只有完美或接近完美的解决方案才能获得高分（90 分以上）。
-- 主要评估本地模型的回答是否正确解决了原始任务
-- 参考答案仅作为参考，本地模型的方案不必与参考答案完全一致"""
-    
-    user_content = f"""【原始编程任务】:
-{original_prompt}
-
-【参考答案】:
-{reference_answer}
-
-【本地模型回答】:
-{local_response}"""
+    system_prompt = get_evaluator_system_prompt(evaluator_level)
+    user_content = get_evaluator_user_content(original_prompt, reference_answer, local_response)
+    combined_prompt = f"{system_prompt}\n\n{user_content}"
 
     # 获取模型专属锁，确保同一模型不会被过于频繁地调用
     model_lock = get_model_lock(model)
@@ -358,25 +475,47 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
                 # 更新最后调用时间（在发起请求前更新，确保后续请求能看到这个时间点）
                 _last_call_times[model] = time.time()
 
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "user", "content": f"{system_prompt}\n\n{user_content}"}
-                    ],
-                    # 移除强制 JSON 格式，以支持更多模型
-                    # response_format={"type": "json_object"},
-                    timeout=120.0  # 显式设置超时
-                )
+                if is_gemini:
+                    response = _call_gemini_native(api_key, model, combined_prompt, timeout=60)
+                else:
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "user", "content": combined_prompt}
+                        ],
+                        # 移除强制 JSON 格式，以支持更多模型
+                        # response_format={"type": "json_object"},
+                        timeout=60.0  # 显式设置超时
+                    )
             # --- 频率限制逻辑结束 ---
             
-            # 保存 response 对象
+            # 保存 response object
             last_response = response
-            raw_content = response.choices[0].message.content
+            
+            # 验证 response 结构是否完整
+            if not response.choices:
+                raise ValueError("API returned response with no choices")
+            
+            message = response.choices[0].message
+            if message is None:
+                raise ValueError("API returned response with None message")
+            
+            raw_content = message.content
 
             last_raw_response = raw_content
             
             if not raw_content:
-                raise ValueError("API returned empty content (None or empty string)")
+                # 思考模型（如 deepseek-v4-flash）可能将内容放在 reasoning_content 字段中
+                reasoning_content = getattr(message, 'reasoning_content', None)
+                if reasoning_content:
+                    raw_content = reasoning_content
+                else:
+                    raise ValueError("API returned empty content (None or empty string)")
+            
+            # 思考模型可能在 <think> 标签中输出思考过程，需要提取干净的内容
+            cot_content, clean_content = extract_cot(raw_content)
+            if cot_content:
+                raw_content = clean_content
             
             # 尝试清洗可能存在的 Markdown 标签
             clean_json = raw_content
@@ -464,10 +603,11 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
 
         except Exception as e:
             last_error = str(e)
-            print(f"[DEBUG] Evaluator attempt {attempt} 失败: {last_error}")
 
-            if last_response and hasattr(last_response, 'choices'):
-                print(f"[DEBUG] Raw response content: {last_response.choices[0].message.content}")
+            if last_response and hasattr(last_response, 'choices') and last_response.choices:
+                message = last_response.choices[0].message
+                if message and hasattr(message, 'content'):
+                    print(f"[DEBUG] Raw response content: {message.content}")
 
             # 如果出错，不增加额外的冷却惩罚
             with model_lock:
@@ -475,8 +615,8 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
                 _last_call_times[model] = time.time()
 
             if attempt < max_retries:
-                print(f"[错误重试] 评委模型 {model} 尝试失败，等待 10 秒后进行下次重试...")
-                time.sleep(10)
+                print(f"[错误重试] 评委模型 {model} 尝试失败，原因: {last_error}，等待 5 秒后进行下次重试...")
+                time.sleep(5)
             
             continue
             

@@ -361,6 +361,77 @@ def get_model_detail_stats(model_name):
     conn.close()
     return df
 
+
+@st.cache_data(ttl=60)
+def get_evaluator_stats():
+    """获取所有评分模型的统计信息（平均评分和评分次数）
+    
+    Returns:
+        list: 包含每个评分模型统计信息的字典列表
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # 查询每个评分模型的统计数据
+    # 映射: 1=gem, 2=opus, 3=gpt, 4=top2, 5=top
+    cursor.execute("""
+        SELECT
+            COUNT(CASE WHEN eval_score_1 > 0 THEN 1 END) as gem_count,
+            AVG(CASE WHEN eval_score_1 > 0 THEN eval_score_1 END) as gem_avg,
+            COUNT(CASE WHEN eval_score_2 > 0 THEN 1 END) as opus_count,
+            AVG(CASE WHEN eval_score_2 > 0 THEN eval_score_2 END) as opus_avg,
+            COUNT(CASE WHEN eval_score_3 > 0 THEN 1 END) as gpt_count,
+            AVG(CASE WHEN eval_score_3 > 0 THEN eval_score_3 END) as gpt_avg,
+            COUNT(CASE WHEN eval_score_4 > 0 THEN 1 END) as top2_count,
+            AVG(CASE WHEN eval_score_4 > 0 THEN eval_score_4 END) as top2_avg,
+            COUNT(CASE WHEN eval_score_5 > 0 THEN 1 END) as top_count,
+            AVG(CASE WHEN eval_score_5 > 0 THEN eval_score_5 END) as top_avg
+        FROM eval_records
+    """)
+    
+    row = cursor.fetchone()
+    conn.close()
+    
+    # 返回格式化的统计数据
+    stats = [
+        {
+            'level': 'gem',
+            'display_name': 'Gem',
+            'count': int(row[0] or 0),
+            'avg_score': round(row[1] or 0, 2)
+        },
+        {
+            'level': 'opus',
+            'display_name': 'Opus',
+            'count': int(row[2] or 0),
+            'avg_score': round(row[3] or 0, 2)
+        },
+        {
+            'level': 'gpt',
+            'display_name': 'GPT',
+            'count': int(row[4] or 0),
+            'avg_score': round(row[5] or 0, 2)
+        },
+        {
+            'level': 'top2',
+            'display_name': 'Top2',
+            'count': int(row[6] or 0),
+            'avg_score': round(row[7] or 0, 2)
+        },
+        {
+            'level': 'top',
+            'display_name': 'Top',
+            'count': int(row[8] or 0),
+            'avg_score': round(row[9] or 0, 2)
+        }
+    ]
+    
+    # 按平均分降序排列
+    stats.sort(key=lambda x: x['avg_score'], reverse=True)
+    
+    return stats
+
+
 @st.cache_data(ttl=30)
 def get_case_summary_stats(model_type="全部"):
     """以测试题为单位的汇总统计（缓存30秒）"""

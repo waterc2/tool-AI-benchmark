@@ -1,7 +1,7 @@
 import streamlit as st
 from init_db import init_db
 from background_tasks import BackgroundTaskManager
-from ui_pages import render_sidebar, render_case_manager, render_test_runner, render_history, render_stats
+from ui_pages import render_sidebar, render_case_manager, render_test_runner, render_history, render_stats, render_evaluator_settings
 
 
 @st.cache_resource
@@ -30,3 +30,5 @@ elif menu == "历史记录":
     render_history()
 elif menu == "统计分析":
     render_stats()
+elif menu == "评分模型设置":
+    render_evaluator_settings()

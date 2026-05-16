@@ -64,6 +64,8 @@ db.sqlite3-journal
 # Database backups
 *_backup_*.db
 eval_results_backup_*.db
+*.db.backup_*
+eval_results.db.bak
 
 # Flask stuff:
 instance/
@@ -212,6 +214,3 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-
-# App modules
-modules/
