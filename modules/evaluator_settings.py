@@ -127,7 +127,7 @@ def test_evaluator_connection(level, api_base, api_key, model_id):
     
     try:
         start_time = time.time()
-        client = OpenAI(api_key=api_key, base_url=api_base, timeout=120.0)
+        client = OpenAI(api_key=api_key, base_url=api_base, timeout=180.0)
         
         response = client.chat.completions.create(
             model=model_id,

@@ -442,10 +442,10 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
     print(f"\n[DEBUG] Calling Evaluator ({evaluator_level}) at: {api_base}")
     print(f"[DEBUG] Evaluator Model: {model}")
 
-    # 评委模型设置 60 秒超时
+    # 评委模型设置 120 秒超时
     is_gemini = _is_gemini_endpoint(api_base)
     if not is_gemini:
-        client = OpenAI(api_key=api_key, base_url=api_base, timeout=60.0)
+        client = OpenAI(api_key=api_key, base_url=api_base, timeout=180.0)
     
     system_prompt = get_evaluator_system_prompt(evaluator_level)
     user_content = get_evaluator_user_content(original_prompt, reference_answer, local_response)
@@ -476,7 +476,7 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
                 _last_call_times[model] = time.time()
 
                 if is_gemini:
-                    response = _call_gemini_native(api_key, model, combined_prompt, timeout=60)
+                    response = _call_gemini_native(api_key, model, combined_prompt, timeout=180)
                 else:
                     response = client.chat.completions.create(
                         model=model,
@@ -485,7 +485,7 @@ def call_evaluator(original_prompt, reference_answer, local_response, evaluator_
                         ],
                         # 移除强制 JSON 格式，以支持更多模型
                         # response_format={"type": "json_object"},
-                        timeout=60.0  # 显式设置超时
+                        timeout=180.0  # 显式设置超时
                     )
             # --- 频率限制逻辑结束 ---
             

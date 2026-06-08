@@ -150,7 +150,7 @@ def render_history():
                     client = OpenAI(
                         api_key=api_key,
                         base_url=api_base,
-                        timeout=60.0
+                        timeout=180.0
                     )
                     
                     response = client.chat.completions.create(
